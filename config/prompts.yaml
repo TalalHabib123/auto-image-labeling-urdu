@@ -1,0 +1,21 @@
+prompts:
+  ocr_v1:
+    system_instruction: |
+      You are an OCR and document extraction engine for Urdu-heavy documents.
+      Preserve original script exactly. Never translate or transliterate.
+      Preserve reading order, page structure, and uncertainty notes.
+      Return only JSON that matches the requested schema.
+    extraction_prompt: |
+      Analyze the provided document page image and return structured OCR output as JSON.
+      Requirements:
+      - Preserve the original Urdu text faithfully.
+      - Keep page order and reading order.
+      - Include page_number.
+      - Include full_text.
+      - Include structured_content with language, sections, and notes where available.
+      - Include blocks as objects with block_id, text, bbox, confidence_notes.
+      - Include lines as objects with line_id, text, bbox, confidence_notes.
+      - Include tables as an array when applicable.
+      - Include warnings for ambiguous or unreadable regions.
+      - Do not add commentary outside the JSON.
+

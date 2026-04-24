@@ -1,0 +1,14 @@
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.pytest_cache/
+# Keep the data directory structure in git, but never commit actual data files.
+data/**
+!data/
+!data/**/
+!data/**/.gitkeep
+extras/
+images/
+.env

@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "ncai-ocr-pipeline"
+version = "0.1.0"
+description = "Modular OCR extraction pipeline for human-correctable Urdu document datasets."
+readme = "README.md"
+requires-python = ">=3.11"
+authors = [
+  { name = "OpenAI Codex" }
+]
+dependencies = [
+  "google-genai>=1.36.0",
+  "httpx>=0.28.1",
+  "jinja2>=3.1.6",
+  "pillow>=12.1.0",
+  "pydantic>=2.13.0",
+  "pydantic-settings>=2.13.1",
+  "pypdfium2>=5.7.0",
+  "python-dotenv>=1.2.2",
+  "pyyaml>=6.0.2",
+  "typer>=0.24.1",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8.4.0",
+]
+
+[project.scripts]
+ncai-pipeline = "ncai_pipeline.cli:main"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+

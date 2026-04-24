@@ -1,0 +1,47 @@
+pipeline:
+  version: "0.1.0"
+  input_dir: "data/input"
+  output_root: "data"
+  allowed_file_types:
+    - ".png"
+    - ".jpg"
+    - ".jpeg"
+    - ".webp"
+    - ".tif"
+    - ".tiff"
+    - ".pdf"
+  process_mode: "per_page"
+  skip_completed: true
+  force_reprocess: false
+  dry_run: false
+  concurrency: 1
+  prompt_version: "ocr_v1"
+  pdf_render_scale: 2.0
+
+provider:
+  name: "gemini"
+  model_name: "gemini-3-flash-preview"
+  timeout_seconds: 90
+  retry_limit: 3
+  retry_backoff_seconds: 5.0
+  retry_max_backoff_seconds: 60.0
+  rate_limit_per_minute: 5
+  rate_limit_max_retries: 4
+  rate_limit_wait_budget_seconds: 300
+  api_base_url: "https://generativelanguage.googleapis.com/v1beta"
+
+review:
+  correction_format: "yaml"
+  report_title: "NCAI OCR Review"
+
+export:
+  instruction: "Extract the document faithfully in original Urdu script and return structured JSON."
+  split_ratios:
+    train: 0.8
+    val: 0.1
+    test: 0.1
+  target_format: "gemma_multimodal_jsonl"
+
+logging:
+  level: "INFO"
+  structured: true
