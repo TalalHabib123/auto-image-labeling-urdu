@@ -304,6 +304,24 @@ class InteractiveModuleTests(unittest.TestCase):
             self.assertEqual(crop.content_type, "image/png")
             self.assertTrue(crop.body.startswith(b"\x89PNG"))
 
+    def test_preview_bbox_text_uses_line_level_direction(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_paths, repository = build_interactive_fixture(
+                Path(temp_dir),
+                manual_full_text="ABC 123\nABC اردو 123",
+            )
+            controller = InteractiveWebController(InteractiveReviewService(data_paths, repository), "127.0.0.1", 8765)
+
+            preview = controller.handle_request("GET", "/documents/doc1/pages/1/preview?mode=corrected")
+            body = preview.body.decode("utf-8")
+
+            self.assertEqual(preview.status_code, 200)
+            self.assertIn('dir="ltr"', body)
+            self.assertIn('dir="rtl"', body)
+            self.assertIn("ABC 123", body)
+            self.assertIn("ABC اردو 123", body)
+            self.assertIn("box-sizing:border-box", body)
+
     def test_bbox_save_route_persists_bbox_changes(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             data_paths, repository = build_interactive_fixture(Path(temp_dir))

@@ -1081,39 +1081,49 @@ class InteractiveReviewService:
         bottom = max(int(fragment.bbox.bottom or 0), top + 28)
         width = max(right - left, 40)
         height = max(bottom - top, 28)
-        content_width = max(width - 16, 24)
-        content_height = max(height - 16, 24)
-        font_size = max(min(int(min(width / 8.0, height / 2.8)), 22), 12)
-        is_rtl = self._looks_rtl(fragment.text)
-        block_html = escape(fragment.text or "Empty fragment").replace("\n", "<br/>")
-        direction = "rtl" if is_rtl else "ltr"
-        alignment = "right" if is_rtl else "left"
+        content_x = left + 6
+        content_y = top + 28 if height >= 58 else top + 6
+        content_width = max(width - 12, 1)
+        content_height = max(bottom - content_y - 6, 1)
+        font_size, _ = self._fit_text_box(fragment.text or "Empty fragment", content_width, content_height)
+        block_html = self._render_bidi_preview_lines(fragment.text or "Empty fragment")
         label_width = min(max(len(fragment.label) * 8 + 26, 84), max(width, 84))
         return [
             f'<g id="bbox-{escape(fragment.fragment_id)}">',
             f'<rect x="{left}" y="{top}" width="{width}" height="{height}" rx="12" fill="rgba(141,74,43,0.08)" stroke="#8d4a2b" stroke-width="1.5" stroke-dasharray="8 6" />',
             f'<rect x="{left}" y="{top}" width="{label_width}" height="22" rx="11" fill="rgba(24,18,14,0.78)" />',
             f'<text x="{left + 10}" y="{top + 15}" fill="#fff8ee" class="preview-note">{index}. {escape(fragment.label)}</text>',
-            f'<foreignObject x="{left + 8}" y="{top + 8}" width="{content_width}" height="{content_height}"><div xmlns="http://www.w3.org/1999/xhtml" style="width:100%;height:100%;padding-top:18px;font-family:Segoe UI Variable, Noto Naskh Arabic, serif;font-size:{font_size}px;line-height:1.35;color:#241712;direction:{direction};text-align:{alignment};word-break:break-word;white-space:pre-wrap;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;">{block_html}</div></foreignObject>',
+            f'<foreignObject x="{content_x}" y="{content_y}" width="{content_width}" height="{content_height}"><div xmlns="http://www.w3.org/1999/xhtml" style="box-sizing:border-box;width:100%;height:100%;padding:0 4px 2px 4px;font-family:Segoe UI Variable, Noto Naskh Arabic, serif;font-size:{font_size}px;line-height:1.32;color:#241712;direction:rtl;text-align:right;word-break:break-word;white-space:pre-wrap;overflow:auto;overscroll-behavior:contain;scrollbar-width:thin;">{block_html}</div></foreignObject>',
             "</g>",
         ]
+
+    def _render_bidi_preview_lines(self, text: str) -> str:
+        lines = text.splitlines() or [""]
+        rendered_lines = []
+        for line in lines:
+            direction = "rtl" if self._looks_rtl(line) else "ltr"
+            line_html = escape(line) if line else "&#160;"
+            rendered_lines.append(
+                f'<div dir="{direction}" style="direction:{direction};unicode-bidi:isolate;text-align:right;">{line_html}</div>'
+            )
+        return "".join(rendered_lines)
 
     def _looks_rtl(self, value: str) -> bool:
         return any("\u0600" <= character <= "\u08ff" for character in value)
 
     def _fit_text_box(self, text: str, width: int, original_height: int) -> tuple[int, int]:
-        max_font = min(30, max(18, int(min(original_height * 0.26 + 8, width / 7.2))))
-        min_font = 16
+        max_font = min(22, max(10, int(min(original_height / 2.2, width / 7.2))))
+        min_font = 10
         for font_size in range(max_font, min_font - 1, -1):
-            line_height = max(int(font_size * 1.42), font_size + 6)
+            line_height = max(int(font_size * 1.36), font_size + 3)
             line_count = self._estimate_line_count(text, width, font_size)
-            required_height = line_count * line_height + 18
-            if required_height <= max(original_height, 72):
-                return max(font_size, 24), required_height
+            required_height = line_count * line_height
+            if required_height <= max(original_height, 1):
+                return max(font_size, 26), required_height
         fallback_font = min_font
-        fallback_line_height = max(int(fallback_font * 1.42), fallback_font + 6)
+        fallback_line_height = max(int(fallback_font * 1.36), fallback_font + 3)
         fallback_count = self._estimate_line_count(text, width, fallback_font)
-        return max(fallback_font, 24), max(original_height, fallback_count * fallback_line_height + 18)
+        return max(fallback_font, 26), fallback_count * fallback_line_height
 
     def _estimate_line_count(self, text: str, width: int, font_size: int) -> int:
         characters_per_line = max(int(width / max(font_size * 0.56, 1)), 4)

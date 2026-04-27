@@ -797,6 +797,10 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     .fragment-editor textarea {
       min-height: 140px;
       background: white;
+      font-size: 1.25rem;
+      direction: rtl;
+      text-align: right;
+      unicode-bidi: plaintext;
     }
     .fragment-crop-frame {
       overflow: hidden;
@@ -1285,7 +1289,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
             {% endif %}
             <label for="{{ fragment.field_name }}">
               {{ fragment.label }} Text
-              <textarea id="{{ fragment.field_name }}" name="{{ fragment.field_name }}" rows="{% if fragment.source_kind == 'full_text' %}12{% else %}5{% endif %}">{{ fragment.text }}</textarea>
+              <textarea id="{{ fragment.field_name }}" data-bidi-lines oninput="adjustDirection(this)" lang="ur" dir="auto" name="{{ fragment.field_name }}" rows="{% if fragment.source_kind == 'full_text' %}12{% else %}5{% endif %}">{{ fragment.text }}</textarea>
             </label>
           </section>
           {% endfor %}
@@ -1319,6 +1323,77 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
         </form>
       </section>
     </main>
+
+    <script>
+      (function () {
+        const LRM = "\\u200e";
+        const RLM = "\\u200f";
+        const lineMarkerPattern = /(^|\\n)[\\u200e\\u200f]/g;
+        const urduPattern = /[\\u0600-\\u06ff\\u0750-\\u077f\\u08a0-\\u08ff]/;
+
+        function stripLineDirectionMarkers(value) {
+          return value.replace(lineMarkerPattern, "$1");
+        }
+
+        function decorateBidiLines(value) {
+          return stripLineDirectionMarkers(value)
+            .split("\\n")
+            .map(function (line) {
+              if (line.length === 0) {
+                return line;
+              }
+              return (urduPattern.test(line) ? RLM : LRM) + line;
+            })
+            .join("\\n");
+        }
+
+        function plainIndexFromDecorated(value, decoratedIndex) {
+          return stripLineDirectionMarkers(value.slice(0, decoratedIndex)).length;
+        }
+
+        function decoratedIndexFromPlain(value, plainIndex) {
+          let plainSeen = 0;
+          for (let index = 0; index < value.length; index += 1) {
+            const character = value.charAt(index);
+            const isLineStart = index === 0 || value.charAt(index - 1) === "\\n";
+            const isMarker = character === LRM || character === RLM;
+            if (isLineStart && isMarker) {
+              continue;
+            }
+            if (plainSeen >= plainIndex) {
+              return index;
+            }
+            plainSeen += 1;
+          }
+          return value.length;
+        }
+
+        window.adjustDirection = function (el) {
+          const selectionStart = plainIndexFromDecorated(el.value, el.selectionStart || 0);
+          const selectionEnd = plainIndexFromDecorated(el.value, el.selectionEnd || 0);
+          const decoratedValue = decorateBidiLines(el.value);
+
+          if (el.value !== decoratedValue) {
+            el.value = decoratedValue;
+          }
+
+          el.setSelectionRange(
+            decoratedIndexFromPlain(decoratedValue, selectionStart),
+            decoratedIndexFromPlain(decoratedValue, selectionEnd)
+          );
+        };
+
+        document.querySelectorAll("textarea[data-bidi-lines]").forEach(function (textarea) {
+          window.adjustDirection(textarea);
+        });
+
+        document.addEventListener("submit", function () {
+          document.querySelectorAll("textarea[data-bidi-lines]").forEach(function (textarea) {
+            textarea.value = stripLineDirectionMarkers(textarea.value);
+          });
+        });
+      }());
+    </script>
 
     <script id="bbox-editor-data" type="application/json">{{ bbox_editor_json|safe }}</script>
     <div class="bbox-modal" id="bbox-editor-modal" hidden>
