@@ -336,6 +336,15 @@ data/
     approved/
     rejected/
   exports/
+    assets/
+      pages/
+      crops/
+    datasets/
+      full/
+      page_text/
+      regions_blocks/
+      regions_sections/
+      handwritten/
     gemma_multimodal/
       train.jsonl
       val.jsonl
@@ -429,12 +438,24 @@ Important:
 
 Implement:
 1. canonical curated sample format
-2. export adapter for JSONL multimodal fine-tuning
+2. export adapters for JSONL, JSON, CSV, and XLSX
+3. dataset modes for full document targets, page text, block/section regions, and handwritten block crops
+4. shared page-image assets plus separate crop assets under exports
 
 Each exported sample should conceptually contain:
 - input image/document reference
 - task instruction
 - target structured output
+- deterministic split metadata
+- approval metadata
+
+Handwritten crop exports should contain one record per handwritten block with:
+- crop path
+- source page image path
+- document/page/block ids
+- bbox
+- text
+- auto/manual/effective handwriting metadata
 
 Also generate:
 - train/val/test split support
@@ -445,6 +466,8 @@ Also generate:
   - avg text length
   - language counts
   - review coverage
+  - dataset counts
+  - skipped handwritten crop counts
   - error counts
 
 ========================
@@ -466,6 +489,11 @@ Support configuration for:
 - whether to process per-page or per-document
 - whether to skip completed items
 - export split ratios
+- export dataset types
+- export output formats
+- export region source
+- shared export page asset strategy
+- handwritten auto-detection keywords and crop padding
 - logging level
 
 Use:

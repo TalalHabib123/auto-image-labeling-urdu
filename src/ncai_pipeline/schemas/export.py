@@ -20,6 +20,10 @@ class CuratedTrainingSample(BaseSchemaModel):
 class ExportStats(BaseSchemaModel):
     sample_counts: dict[str, int] = Field(default_factory=dict)
     page_counts: dict[str, int] = Field(default_factory=dict)
+    dataset_counts: dict[str, int] = Field(default_factory=dict)
+    format_counts: dict[str, int] = Field(default_factory=dict)
+    asset_counts: dict[str, int] = Field(default_factory=dict)
+    skipped_counts: dict[str, int] = Field(default_factory=dict)
     average_text_length: float = 0.0
     language_counts: dict[str, int] = Field(default_factory=dict)
     review_coverage: dict[str, int] = Field(default_factory=dict)
@@ -31,5 +35,8 @@ class ExportManifest(BaseSchemaModel):
     samples: int
     generated_at: str
     stats: ExportStats
-    files: dict[str, str] = Field(default_factory=dict)
-
+    files: dict[str, object] = Field(default_factory=dict)
+    dataset_types: list[str] = Field(default_factory=list)
+    output_formats: list[str] = Field(default_factory=list)
+    dataset_id: str | None = None
+    output_format: str | None = None

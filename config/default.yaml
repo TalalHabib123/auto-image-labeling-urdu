@@ -25,7 +25,7 @@ provider:
   retry_limit: 3
   retry_backoff_seconds: 5.0
   retry_max_backoff_seconds: 60.0
-  rate_limit_per_minute: 5
+  rate_limit_per_minute: 15
   rate_limit_max_retries: 4
   rate_limit_wait_budget_seconds: 300
   api_base_url: "https://generativelanguage.googleapis.com/v1beta"
@@ -41,6 +41,25 @@ export:
     val: 0.1
     test: 0.1
   target_format: "gemma_multimodal_jsonl"
+  dataset_types:
+    - "handwritten"
+  output_formats:
+    - "jsonl"
+  region_source: "blocks"
+  assets:
+    page_strategy: "shared_copy"
+  handwritten:
+    auto_detect: true
+    keywords:
+      - "handwritten"
+      - "handwriting"
+      - "hand-written"
+      - "written by hand"
+      - "manuscript"
+      - "دستی"
+      - "دستخط"
+      - "تحریر"
+    crop_padding: 24
 
 logging:
   level: "INFO"

@@ -580,6 +580,32 @@ class InteractiveModuleTests(unittest.TestCase):
             self.assertIn(b"Adjust Bounding Boxes", document.body)
             self.assertIn(b"No bbox-editable fragments exist for this page.", document.body)
 
+    def test_web_commit_persists_manual_handwritten_block_flags(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            data_paths, repository = build_interactive_fixture(Path(temp_dir))
+            service = InteractiveReviewService(data_paths, repository)
+            controller = InteractiveWebController(service, "127.0.0.1", 8765)
+
+            response = controller.handle_request(
+                "POST",
+                "/documents/doc1/pages/1/commit",
+                body=(
+                    "fragment_0=manual+handwritten&"
+                    "fragment_1=printed&"
+                    "handwritten_0=true&"
+                    "structured_content_json=%7B%22language%22%3A%22ur%22%7D&"
+                    "reviewer=qa&status=verified&comments="
+                ).encode("utf-8"),
+            )
+
+            corrected = load_corrected_document(data_paths.correction_files_dir / "doc1" / "corrected.yaml", repository)
+            context = service.get_document_context("doc1", page_number=1)
+            self.assertEqual(response.status_code, 303)
+            self.assertTrue(corrected.extracted_pages[0].blocks[0].handwritten_manual)
+            self.assertFalse(corrected.extracted_pages[0].blocks[1].handwritten_manual)
+            self.assertEqual(context.selected_page_workspace.handwritten_count, 1)
+            self.assertEqual(context.page_summaries[0].handwritten_count, 1)
+
     def test_document_approval_updates_manifest_status(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             data_paths, repository = build_interactive_fixture(Path(temp_dir))

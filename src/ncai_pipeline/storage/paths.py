@@ -29,6 +29,22 @@ class DataPaths:
         return self.root / "exports"
 
     @property
+    def export_assets_dir(self) -> Path:
+        return self.exports_dir / "assets"
+
+    @property
+    def export_page_assets_dir(self) -> Path:
+        return self.export_assets_dir / "pages"
+
+    @property
+    def export_crop_assets_dir(self) -> Path:
+        return self.export_assets_dir / "crops"
+
+    @property
+    def export_datasets_dir(self) -> Path:
+        return self.exports_dir / "datasets"
+
+    @property
     def manifests_dir(self) -> Path:
         return self.working_dir / "manifests"
 
@@ -90,6 +106,10 @@ class DataPaths:
             self.approved_dir,
             self.rejected_dir,
             self.dry_run_dir,
+            self.exports_dir,
+            self.export_page_assets_dir,
+            self.export_crop_assets_dir,
+            self.export_datasets_dir,
             self.export_target_dir,
         ]:
             path.mkdir(parents=True, exist_ok=True)

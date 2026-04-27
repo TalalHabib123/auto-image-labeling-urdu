@@ -7,7 +7,7 @@ Production-style OCR extraction pipeline for Urdu-heavy documents with:
 - raw/parsed/review artifact persistence
 - YAML-based human correction workflow
 - curated training sample assembly
-- deterministic JSONL export for future Gemma multimodal fine-tuning
+- deterministic multi-format exports for future Gemma multimodal fine-tuning and OCR datasets
 
 ## Architecture
 
@@ -20,7 +20,7 @@ The pipeline is organized under `src/ncai_pipeline/` by responsibility:
 - `storage/`: deterministic artifact paths and repository helpers
 - `review/`: correction YAML and HTML review report generation
 - `interactive/`: shared review service plus local web and terminal review surfaces
-- `export/`: curated sample building, split assignment, JSONL export
+- `export/`: curated sample building, split assignment, dataset assets, and JSONL/JSON/CSV/XLSX export
 - `observability/`: logging, metrics, run manifests
 - `schemas/`: Pydantic models for manifests, extraction, review, and export artifacts
 
@@ -57,6 +57,7 @@ Important settings:
 - prompt version
 - `per_page` or `per_document` processing
 - export split ratios
+- export dataset types, output formats, region source, shared asset strategy, and handwritten crop settings
 - logging level
 
 You can point to a different config file with `NCAI_CONFIG_PATH` or `--config`.
@@ -128,6 +129,7 @@ The web UI provides:
 - raw provider response inspection
 - normalized extraction inspection
 - editable corrected content
+- manual handwritten block tagging, with automatic badges from block notes
 - page verification and document approval/rejection
 
 ## Correction Workflow
@@ -170,13 +172,25 @@ Only approved correction files are exported.
 python main.py export
 ```
 
+The default export remains the full Gemma-style JSONL dataset. You can select additional dataset types and formats from the command line or `config/default.yaml`.
+
+```bash
+python main.py export --dataset-type page_text --format csv --format xlsx
+python main.py export --dataset-type regions --region-source blocks
+python main.py export --dataset-type regions --region-source sections
+python main.py export --dataset-type handwritten --format jsonl
+```
+
 Export outputs:
 
 - `data/curated/approved/<document_id>/sample.json`
-- `data/exports/gemma_multimodal/train.jsonl`
-- `data/exports/gemma_multimodal/val.jsonl`
-- `data/exports/gemma_multimodal/test.jsonl`
-- `data/exports/gemma_multimodal/export_manifest.json`
+- `data/exports/assets/pages/<document_id>/page_XXXX.png`
+- `data/exports/assets/crops/handwritten/<document_id>/page_XXXX/<block_id>.png`
+- `data/exports/datasets/<dataset_id>/<format>/train.<ext>`
+- `data/exports/datasets/<dataset_id>/<format>/val.<ext>`
+- `data/exports/datasets/<dataset_id>/<format>/test.<ext>`
+- `data/exports/export_manifest.json`
+- legacy full JSONL aliases under `data/exports/gemma_multimodal/`
 
 Each exported sample contains:
 
@@ -185,6 +199,16 @@ Each exported sample contains:
 - target structured output
 - approval metadata
 - deterministic train/val/test split
+
+Supported dataset types:
+
+- `full`: one sample per approved document with the complete target output
+- `page_text`: one sample per page with page image path and `full_text`
+- `regions` with `--region-source blocks`: page-level block targets with bbox and handwritten flags
+- `regions` with `--region-source sections`: page-level structured sections
+- `handwritten`: one sample per handwritten block crop with crop path and text
+
+Supported formats are `jsonl`, `json`, `csv`, and `xlsx`.
 
 ## Example Output Artifacts
 
@@ -318,13 +342,15 @@ python main.py approve <document_id> --reviewer <name> --status rejected --comme
 
 ### `export`
 
-Builds curated approved samples and JSONL exports.
+Builds curated approved samples in selected dataset types and formats.
 
 Examples:
 
 ```bash
 python main.py export
 python main.py export --include-dry-run
+python main.py export --dataset-type page_text --format csv --format xlsx
+python main.py export --dataset-type handwritten --format jsonl
 ```
 
 ### `dry-run-artifacts`

@@ -18,6 +18,7 @@ from ncai_pipeline.providers.base import ExtractionProvider
 from ncai_pipeline.providers.gemini_provider import GeminiProvider
 from ncai_pipeline.review.html_report import render_review_report
 from ncai_pipeline.review.dry_run_policy import corrected_document_is_dry_run
+from ncai_pipeline.review.handwriting import block_handwriting_status
 from ncai_pipeline.schemas.common import BoundingBox, PipelineStatus, ReviewStatus
 from ncai_pipeline.schemas.document import DocumentManifest
 from ncai_pipeline.schemas.extraction import NormalizedExtraction, RawExtractionRecord
@@ -56,6 +57,10 @@ class PageFragment:
     text: str
     bbox: BoundingBox | None = None
     confidence_notes: str | None = None
+    handwritten_auto: bool = False
+    handwritten_manual: bool = False
+    handwritten_effective: bool = False
+    handwritten_source: str = "none"
     field_name: str = ""
     anchor_id: str = ""
 
@@ -72,6 +77,7 @@ class PageWorkspace:
     fragments: list[PageFragment]
     warning_count: int
     crop_count: int
+    handwritten_count: int
 
 
 @dataclass
@@ -81,6 +87,7 @@ class PageSummary:
     warning_count: int
     fragment_count: int
     fragment_mode: str
+    handwritten_count: int
 
 
 @dataclass
@@ -128,7 +135,9 @@ class InteractiveReviewService:
         return self.repository.read_json(path)
 
     def load_latest_export_summary(self) -> dict[str, Any] | None:
-        path = self.data_paths.export_target_dir / "export_manifest.json"
+        path = self.data_paths.exports_dir / "export_manifest.json"
+        if not path.exists():
+            path = self.data_paths.export_target_dir / "export_manifest.json"
         if not path.exists():
             return None
         return self.repository.read_json(path)
@@ -273,6 +282,7 @@ class InteractiveReviewService:
                     warning_count=len(self.filter_display_warnings(page.warnings)),
                     fragment_count=len(page_workspace.fragments),
                     fragment_mode=page_workspace.mode,
+                    handwritten_count=page_workspace.handwritten_count,
                 )
             )
 
@@ -380,6 +390,7 @@ class InteractiveReviewService:
         page_number: int,
         *,
         fragment_texts: list[str],
+        fragment_handwritten_flags: list[bool] | None = None,
         structured_content_text: str,
         reviewer: str = "",
         status: PageVerificationStatus = PageVerificationStatus.PENDING,
@@ -407,6 +418,8 @@ class InteractiveReviewService:
         if workspace.mode == "blocks":
             for index, block in enumerate(extraction.blocks):
                 block.text = fragment_values[index]
+                if fragment_handwritten_flags is not None and index < len(fragment_handwritten_flags):
+                    block.handwritten_manual = bool(fragment_handwritten_flags[index])
             extraction.full_text = "\n\n".join(value for value in fragment_values if value.strip())
         elif workspace.mode == "lines":
             for index, line in enumerate(extraction.lines):
@@ -529,6 +542,7 @@ class InteractiveReviewService:
         fragments: list[PageFragment] = []
         if page.blocks:
             for index, block in enumerate(page.blocks, start=1):
+                handwriting = block_handwriting_status(block)
                 fragments.append(
                     PageFragment(
                         fragment_id=f"block-{index}",
@@ -537,6 +551,10 @@ class InteractiveReviewService:
                         text=block.text,
                         bbox=block.bbox,
                         confidence_notes=block.confidence_notes,
+                        handwritten_auto=bool(handwriting["handwritten_auto"]),
+                        handwritten_manual=bool(handwriting["handwritten_manual"]),
+                        handwritten_effective=bool(handwriting["handwritten_effective"]),
+                        handwritten_source=str(handwriting["handwritten_source"]),
                         field_name=f"fragment_{index - 1}",
                         anchor_id=f"fragment-{index - 1}",
                     )
@@ -573,11 +591,13 @@ class InteractiveReviewService:
             mode = "full_text"
 
         crop_count = sum(1 for fragment in fragments if fragment.has_bbox)
+        handwritten_count = sum(1 for fragment in fragments if fragment.handwritten_effective)
         return PageWorkspace(
             mode=mode,
             fragments=fragments,
             warning_count=len(self.filter_display_warnings(page.warnings)),
             crop_count=crop_count,
+            handwritten_count=handwritten_count,
         )
 
     def build_page_preview_svg(self, document_id: str, page_number: int, mode: str = "corrected") -> str:

@@ -42,6 +42,8 @@ def normalize_provider_payload(document_id: str, page_number: int | None, payloa
             text=str(item.get("text", "")),
             bbox=_to_bbox(item.get("bbox")),
             confidence_notes=item.get("confidence_notes"),
+            handwritten_auto=item.get("handwritten_auto", item.get("auto_handwritten", item.get("is_handwritten"))),
+            handwritten_manual=item.get("handwritten_manual"),
             lines=[
                 ExtractedLine(
                     line_id=str(line.get("line_id", f"line_{line_index + 1}")),

@@ -7,8 +7,8 @@ from typing import Annotated, Any, Callable
 import typer
 
 from ncai_pipeline.config import AppConfig, load_app_config, load_environment, load_prompts
-from ncai_pipeline.export.dataset_builder import DatasetBuilder
-from ncai_pipeline.export.jsonl_exporter import write_jsonl
+from ncai_pipeline.export.dataset_builder import DatasetBuilder, normalize_dataset_ids
+from ncai_pipeline.export.writers import write_records
 from ncai_pipeline.interactive.service import InteractiveReviewService
 from ncai_pipeline.interactive.tui import run_terminal_dashboard
 from ncai_pipeline.interactive.web import serve_web_ui
@@ -44,23 +44,97 @@ def _write_exports(
     data_paths: DataPaths,
     repository: FileRepository,
     include_dry_run: bool = False,
+    dataset_types: list[str] | None = None,
+    output_formats: list[str] | None = None,
+    region_source: str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
-) -> tuple[int, dict[str, str], object]:
+) -> tuple[int, dict[str, Any], object]:
     builder = DatasetBuilder(config, data_paths, repository)
-    samples, manifest = builder.build_samples(include_dry_run=include_dry_run, progress_callback=progress_callback)
-    split_map = {"train": [], "val": [], "test": []}
-    for sample in samples:
-        split_map[sample.source_split].append(sample)
+    requested_dataset_types = dataset_types or config.export.dataset_types
+    requested_formats = _normalize_output_formats(output_formats or config.export.output_formats)
+    requested_region_source = region_source or config.export.region_source
+    datasets, manifest = builder.build_datasets(
+        dataset_types=requested_dataset_types,
+        region_source=requested_region_source,
+        include_dry_run=include_dry_run,
+        progress_callback=progress_callback,
+    )
+    dataset_ids = normalize_dataset_ids(requested_dataset_types, requested_region_source)
+    files: dict[str, Any] = {}
+    split_names = ["train", "val", "test"]
+    extension_map = {"jsonl": "jsonl", "json": "json", "csv": "csv", "xlsx": "xlsx"}
 
-    files: dict[str, str] = {}
-    for split_name, split_samples in split_map.items():
-        file_path = data_paths.export_target_dir / f"{split_name}.jsonl"
-        write_jsonl(file_path, split_samples)
-        files[split_name] = str(file_path)
+    for dataset_id in dataset_ids:
+        files[dataset_id] = {}
+        records = datasets.get(dataset_id, [])
+        for output_format in requested_formats:
+            format_dir = data_paths.export_datasets_dir / dataset_id / output_format
+            format_files: dict[str, str] = {}
+            for split_name in split_names:
+                split_records = [record for record in records if record.get("source_split") == split_name]
+                file_path = format_dir / f"{split_name}.{extension_map[output_format]}"
+                write_records(file_path, split_records, output_format)
+                format_files[split_name] = str(file_path)
+            files[dataset_id][output_format] = format_files
+            format_manifest = manifest.model_copy(deep=True)
+            format_manifest.dataset_id = dataset_id
+            format_manifest.output_format = output_format
+            format_manifest.dataset_types = [dataset_id]
+            format_manifest.output_formats = [output_format]
+            format_manifest.samples = len(records)
+            format_manifest.files = format_files
+            repository.write_json(format_dir / "export_manifest.json", format_manifest)
 
+    manifest.dataset_types = dataset_ids
+    manifest.output_formats = requested_formats
     manifest.files = files
-    repository.write_json(data_paths.export_target_dir / "export_manifest.json", manifest)
-    return len(samples), files, manifest
+    manifest.stats.format_counts = {
+        output_format: sum(len(records) for records in datasets.values())
+        for output_format in requested_formats
+    }
+    repository.write_json(data_paths.exports_dir / "export_manifest.json", manifest)
+
+    if "full" in datasets and "jsonl" in requested_formats:
+        _write_legacy_full_jsonl_aliases(data_paths, repository, datasets["full"], manifest)
+
+    return manifest.samples, files, manifest
+
+
+def _normalize_output_formats(output_formats: list[str]) -> list[str]:
+    normalized: list[str] = []
+    for item in output_formats:
+        output_format = item.strip().lower()
+        if output_format == "excel":
+            output_format = "xlsx"
+        if output_format not in {"jsonl", "json", "csv", "xlsx"}:
+            raise typer.BadParameter("format must be one of: jsonl, json, csv, xlsx")
+        if output_format not in normalized:
+            normalized.append(output_format)
+    return normalized
+
+
+def _write_legacy_full_jsonl_aliases(
+    data_paths: DataPaths,
+    repository: FileRepository,
+    records: list[dict[str, Any]],
+    manifest: object,
+) -> None:
+    files: dict[str, str] = {}
+    for split_name in ["train", "val", "test"]:
+        split_records = [record for record in records if record.get("source_split") == split_name]
+        file_path = data_paths.export_target_dir / f"{split_name}.jsonl"
+        write_records(file_path, split_records, "jsonl")
+        files[split_name] = str(file_path)
+    legacy_manifest = manifest.model_copy(deep=True) if hasattr(manifest, "model_copy") else manifest
+    legacy_manifest.files = files
+    legacy_manifest.dataset_types = ["full"]
+    legacy_manifest.output_formats = ["jsonl"]
+    legacy_manifest.dataset_id = "full"
+    legacy_manifest.output_format = "jsonl"
+    legacy_manifest.samples = len(records)
+    legacy_manifest.stats.dataset_counts = {"full": len(records)}
+    legacy_manifest.stats.format_counts = {"jsonl": len(records)}
+    repository.write_json(data_paths.export_target_dir / "export_manifest.json", legacy_manifest)
 
 
 def _format_document_entry(entry: dict[str, Any]) -> str:
@@ -274,6 +348,9 @@ def approve(
 def export(
     config_path: Annotated[str | None, typer.Option("--config")] = None,
     include_dry_run: Annotated[bool, typer.Option("--include-dry-run")] = False,
+    dataset_types: Annotated[list[str] | None, typer.Option("--dataset-type", help="Dataset type: full, page_text, regions, regions_blocks, regions_sections, handwritten")] = None,
+    output_formats: Annotated[list[str] | None, typer.Option("--format", help="Output format: jsonl, json, csv, xlsx")] = None,
+    region_source: Annotated[str | None, typer.Option("--region-source", help="Region source for --dataset-type regions: blocks or sections")] = None,
 ) -> None:
     config, data_paths, repository = _load_runtime(config_path)
     sample_count, _, _ = _write_exports(
@@ -281,9 +358,12 @@ def export(
         data_paths,
         repository,
         include_dry_run=include_dry_run,
+        dataset_types=dataset_types,
+        output_formats=output_formats,
+        region_source=region_source,
         progress_callback=_emit_export_progress,
     )
-    typer.echo(f"Exported {sample_count} approved sample(s) to {data_paths.export_target_dir}")
+    typer.echo(f"Exported {sample_count} approved sample(s) to {data_paths.export_datasets_dir}")
 
 
 @app.command("dry-run-artifacts")

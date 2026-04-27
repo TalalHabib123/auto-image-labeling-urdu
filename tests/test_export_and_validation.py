@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import json
 import logging
 import tempfile
 import unittest
+import zipfile
 from pathlib import Path
 import sys
 
 sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "src").resolve()))
 
+from PIL import Image
 import yaml
 from typer.testing import CliRunner
 
@@ -47,6 +50,15 @@ class ExportAndValidationTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 load_corrected_document(correction_path, repository)
+
+    def test_export_config_defaults_to_full_jsonl(self) -> None:
+        config = AppConfig()
+
+        self.assertEqual(config.export.dataset_types, ["full"])
+        self.assertEqual(config.export.output_formats, ["jsonl"])
+        self.assertEqual(config.export.region_source, "blocks")
+        self.assertEqual(config.export.assets.page_strategy, "shared_copy")
+        self.assertTrue(config.export.handwritten.auto_detect)
 
     def test_dataset_builder_exports_approved_only_and_isolates_dry_run(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -272,6 +284,163 @@ class ExportAndValidationTests(unittest.TestCase):
             self.assertIn("Export progress: 0/1 review records scanned | included=0", result.output)
             self.assertIn("outcome=included", result.output)
             self.assertIn("Exported 1 approved sample(s)", result.output)
+
+    def test_export_command_writes_all_dataset_types_formats_and_handwritten_crops(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_paths = DataPaths(root / "data")
+            data_paths.ensure()
+            repository = FileRepository()
+
+            extraction = normalize_provider_payload(
+                "doc1",
+                1,
+                {
+                    "language": "ur",
+                    "full_text": "Ù…ØªÙ†",
+                    "structured_content": {"language": "ur", "sections": [{"title": "body", "content": "Ù…ØªÙ†"}]},
+                    "blocks": [
+                        {
+                            "block_id": "b1",
+                            "text": "Ù…ØªÙ†",
+                            "bbox": [20, 10, 80, 100],
+                            "confidence_notes": "contains handwritten amount",
+                        },
+                        {
+                            "block_id": "b2",
+                            "text": "printed",
+                            "bbox": [90, 10, 130, 100],
+                            "confidence_notes": "high",
+                        },
+                        {
+                            "block_id": "b3",
+                            "text": "missing bbox",
+                            "bbox": None,
+                            "confidence_notes": "high",
+                            "handwritten_manual": True,
+                        },
+                        {
+                            "block_id": "b4",
+                            "text": "",
+                            "bbox": [140, 10, 170, 100],
+                            "confidence_notes": "high",
+                            "handwritten_manual": True,
+                        },
+                    ],
+                    "lines": [],
+                    "tables": [],
+                    "warnings": [],
+                    "confidence_notes": [],
+                },
+            )
+            corrected = CorrectedDocument(
+                document_id="doc1",
+                approval_metadata=ApprovalMetadata(
+                    review_status=ReviewStatus.APPROVED,
+                    reviewer="qa",
+                ),
+                extracted_pages=[extraction],
+                consolidated_text="Ù…ØªÙ†",
+                target_output={"full_text": "Ù…ØªÙ†"},
+            )
+            correction_path = data_paths.correction_files_dir / "doc1" / "corrected.yaml"
+            repository.write_yaml(correction_path, corrected)
+            repository.write_json(
+                data_paths.status_dir / "doc1" / "review_record.json",
+                ReviewRecord(
+                    document_id="doc1",
+                    review_status=ReviewStatus.APPROVED,
+                    reviewer="qa",
+                    comments=None,
+                    corrected_output_path=str(correction_path),
+                    raw_output_path=str(data_paths.raw_responses_dir / "doc1"),
+                    report_path=str(data_paths.reports_dir / "doc1" / "report.html"),
+                ),
+            )
+            rendered_dir = data_paths.rendered_pages_dir / "doc1"
+            rendered_dir.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (220, 220), color="white").save(rendered_dir / "page_0001.png")
+
+            config = AppConfig.model_validate(
+                {
+                    "pipeline": {
+                        "version": "test",
+                        "input_dir": str(data_paths.input_dir),
+                        "output_root": str(data_paths.root),
+                    },
+                    "provider": {"name": "gemini", "model_name": "fake-model", "api_base_url": "https://example.invalid"},
+                    "review": {"correction_format": "yaml", "report_title": "Test Review"},
+                    "export": {
+                        "instruction": "Test instruction",
+                        "split_ratios": {"train": 0.8, "val": 0.1, "test": 0.1},
+                        "target_format": "jsonl",
+                    },
+                    "logging": {"level": "INFO", "structured": True},
+                }
+            )
+            config_path = root / "config.yaml"
+            config_path.write_text(yaml.safe_dump(config.model_dump(mode="json"), sort_keys=False), encoding="utf-8")
+
+            result = self.runner.invoke(
+                app,
+                [
+                    "export",
+                    "--config",
+                    str(config_path),
+                    "--dataset-type",
+                    "full",
+                    "--dataset-type",
+                    "page_text",
+                    "--dataset-type",
+                    "regions",
+                    "--region-source",
+                    "blocks",
+                    "--dataset-type",
+                    "regions_sections",
+                    "--dataset-type",
+                    "handwritten",
+                    "--format",
+                    "jsonl",
+                    "--format",
+                    "json",
+                    "--format",
+                    "csv",
+                    "--format",
+                    "xlsx",
+                ],
+            )
+            reset_logging()
+
+            self.assertEqual(result.exit_code, 0, result.output)
+            manifest = repository.read_json(data_paths.exports_dir / "export_manifest.json")
+            self.assertEqual(manifest["stats"]["dataset_counts"]["page_text"], 1)
+            self.assertEqual(manifest["stats"]["dataset_counts"]["regions_blocks"], 1)
+            self.assertEqual(manifest["stats"]["dataset_counts"]["regions_sections"], 1)
+            self.assertEqual(manifest["stats"]["dataset_counts"]["handwritten"], 1)
+            self.assertEqual(manifest["stats"]["skipped_counts"]["handwritten_missing_bbox"], 1)
+            self.assertEqual(manifest["stats"]["skipped_counts"]["handwritten_empty_text"], 1)
+
+            self.assertTrue((data_paths.export_page_assets_dir / "doc1" / "page_0001.png").exists())
+            crop_path = data_paths.export_crop_assets_dir / "handwritten" / "doc1" / "page_0001" / "b1.png"
+            self.assertTrue(crop_path.exists())
+
+            rows = []
+            for handwritten_file in manifest["files"]["handwritten"]["jsonl"].values():
+                rows.extend(
+                    json.loads(line)
+                    for line in Path(handwritten_file).read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                )
+            self.assertEqual(rows[0]["block_id"], "b1")
+            self.assertEqual(rows[0]["handwritten_source"], "auto")
+            self.assertEqual(Path(rows[0]["crop_path"]), crop_path)
+
+            self.assertTrue((data_paths.export_datasets_dir / "page_text" / "csv" / "train.csv").exists())
+            xlsx_path = data_paths.export_datasets_dir / "page_text" / "xlsx" / "train.xlsx"
+            self.assertTrue(xlsx_path.exists())
+            self.assertTrue(zipfile.is_zipfile(xlsx_path))
+            self.assertTrue((data_paths.export_target_dir / "train.jsonl").exists())
+            self.assertTrue((data_paths.export_target_dir / "export_manifest.json").exists())
 
 
 if __name__ == "__main__":

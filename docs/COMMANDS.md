@@ -87,6 +87,8 @@ What the web UI gives you:
 - page image viewer
 - raw response and normalized extraction inspection
 - editable corrected content
+- automatic handwritten badges from block notes
+- manual handwritten block assignment for handwritten-crop exports
 - page verification
 - document approval/rejection
 
@@ -164,11 +166,15 @@ Note:
 
 ## `export`
 
-Builds curated samples and writes JSONL exports from approved correction files.
+Builds curated samples from approved correction files and writes one or more dataset types in JSONL, JSON, CSV, or XLSX.
 
 ```powershell
 python main.py export
 python main.py export --include-dry-run
+python main.py export --dataset-type page_text --format csv --format xlsx
+python main.py export --dataset-type regions --region-source blocks
+python main.py export --dataset-type regions --region-source sections
+python main.py export --dataset-type handwritten --format jsonl
 ```
 
 What it does:
@@ -177,13 +183,51 @@ What it does:
 - loads approved `corrected.yaml` files
 - excludes dry-run artifacts by default
 - assigns deterministic train/val/test splits
-- writes `sample.json` files and JSONL exports
-- writes `data/exports/gemma_multimodal/export_manifest.json`
+- copies whole-page images once into shared export assets
+- generates handwritten block crops when requested
+- writes `sample.json` files and selected dataset exports
+- writes per-format manifests and `data/exports/export_manifest.json`
 
 You will see:
 
 - live review-record export progress
 - final export count summary
+
+Important flags:
+
+- `--dataset-type`: repeatable; supported values are `full`, `page_text`, `regions`, `regions_blocks`, `regions_sections`, and `handwritten`
+- `--format`: repeatable; supported values are `jsonl`, `json`, `csv`, and `xlsx`
+- `--region-source`: `blocks` or `sections` when `--dataset-type regions` is used
+- `--include-dry-run`: include approved dry-run samples
+- `--config`: load a different YAML config file
+
+Default config equivalent:
+
+```yaml
+export:
+  dataset_types: ["full"]
+  output_formats: ["jsonl"]
+  region_source: "blocks"
+  assets:
+    page_strategy: "shared_copy"
+  handwritten:
+    auto_detect: true
+    crop_padding: 24
+```
+
+Output layout:
+
+```text
+data/exports/
+  assets/pages/<document_id>/page_0001.png
+  assets/crops/handwritten/<document_id>/page_0001/<block_id>.png
+  datasets/<dataset_id>/<format>/train.<ext>
+  datasets/<dataset_id>/<format>/val.<ext>
+  datasets/<dataset_id>/<format>/test.<ext>
+  export_manifest.json
+```
+
+The default full JSONL export is also mirrored to `data/exports/gemma_multimodal/` for compatibility with older scripts.
 
 ## `dry-run-artifacts`
 
@@ -247,6 +291,7 @@ python main.py pipeline-status --status failed
 
 ```powershell
 python main.py export
+python main.py export --dataset-type full --dataset-type handwritten --format jsonl
 ```
 
 ### 6. Clean up placeholder dry-run data

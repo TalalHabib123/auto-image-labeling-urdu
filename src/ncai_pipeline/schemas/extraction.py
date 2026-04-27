@@ -19,6 +19,8 @@ class ExtractedBlock(BaseSchemaModel):
     text: str
     bbox: BoundingBox | None = None
     confidence_notes: str | None = None
+    handwritten_auto: bool | None = None
+    handwritten_manual: bool | None = None
     lines: list[ExtractedLine] = Field(default_factory=list)
 
 

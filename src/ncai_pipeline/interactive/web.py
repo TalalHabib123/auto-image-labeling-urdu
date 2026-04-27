@@ -824,6 +824,33 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       color: var(--muted);
       font-size: 0.92rem;
     }
+    .fragment-flags {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      margin: 12px 0;
+    }
+    .fragment-flag {
+      width: auto;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 10px;
+      border: 1px solid rgba(185, 147, 115, 0.38);
+      border-radius: 999px;
+      background: rgba(255, 253, 248, 0.92);
+      color: var(--ink);
+      font-weight: 700;
+    }
+    .fragment-flag input {
+      width: auto;
+      min-width: 18px;
+      min-height: 18px;
+      padding: 0;
+    }
+    .handwriting-auto { background: rgba(154,107,29,0.16); color: var(--warn); }
+    .handwriting-manual { background: rgba(47,111,79,0.16); color: var(--ok); }
     .fragment-empty {
       padding: 18px;
       border-radius: 18px;
@@ -1140,7 +1167,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       </div>
       <div class="rail-item">
         <span class="rail-label">Workspace</span>
-        <span class="rail-value workspace-summary">{{ page_workspace.mode }} - {{ page_workspace.fragments|length }} fields</span>
+        <span class="rail-value workspace-summary">{{ page_workspace.mode }} - {{ page_workspace.fragments|length }} fields - {{ page_workspace.handwritten_count }} handwritten</span>
         <span class="rail-value">{{ page_workspace.mode }} · {{ page_workspace.fragments|length }} fields</span>
       </div>
       <div class="rail-item">
@@ -1177,6 +1204,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
             </div>
             <div class="page-link-meta">
               <span class="meta-text">{{ item.fragment_count }} {{ item.fragment_mode }}</span>
+              <span class="meta-text">{{ item.handwritten_count }} handwritten</span>
               <span class="meta-text">{% if item.warning_count %}{{ item.warning_count }} system alerts{% else %}clear{% endif %}</span>
             </div>
           </a>
@@ -1270,6 +1298,26 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
               </div>
               <span class="panel-subtle">{{ fragment.source_kind|replace('_', ' ') }}</span>
             </div>
+            {% if fragment.source_kind == "block" %}
+            <div class="fragment-flags">
+              <label class="fragment-flag" for="handwritten_{{ loop.index0 }}">
+                <input
+                  id="handwritten_{{ loop.index0 }}"
+                  type="checkbox"
+                  name="handwritten_{{ loop.index0 }}"
+                  value="true"
+                  {% if fragment.handwritten_effective %}checked{% endif %}
+                />
+                Handwritten
+              </label>
+              {% if fragment.handwritten_auto %}
+              <span class="pill handwriting-auto">auto detected</span>
+              {% endif %}
+              {% if fragment.handwritten_source == "manual" %}
+              <span class="pill handwriting-manual">manual</span>
+              {% endif %}
+            </div>
+            {% endif %}
             {% if fragment.has_bbox %}
             <div class="fragment-crop-frame">
               <img
@@ -2323,6 +2371,7 @@ class InteractiveWebController:
             "lines": [item.model_dump(mode="json") for item in context.selected_page.lines],
             "tables": [item.model_dump(mode="json") for item in context.selected_page.tables],
             "raw_preview_warnings": display_raw_warnings,
+            "handwritten_count": context.selected_page_workspace.handwritten_count,
         }
         bbox_editor_enabled = context.selected_page_workspace.mode != "full_text"
         bbox_editor_fragments = [
@@ -2332,6 +2381,10 @@ class InteractiveWebController:
                 "text": fragment.text,
                 "sourceKind": fragment.source_kind,
                 "confidenceNotes": fragment.confidence_notes or "",
+                "handwrittenAuto": fragment.handwritten_auto,
+                "handwrittenManual": fragment.handwritten_manual,
+                "handwrittenEffective": fragment.handwritten_effective,
+                "handwrittenSource": fragment.handwritten_source,
                 "bbox": _bbox_payload_from_fragment(fragment),
             }
             for fragment in context.selected_page_workspace.fragments
@@ -2472,10 +2525,12 @@ class InteractiveWebController:
             if key.startswith("fragment_") and key.split("_")[1].isdigit()
         )
         fragment_texts = [value for _, value in fragment_pairs]
+        handwritten_flags = [form.get(f"handwritten_{index}") == "true" for index, _ in fragment_pairs]
         self.service.commit_page_review(
             document_id,
             page_number,
             fragment_texts=fragment_texts,
+            fragment_handwritten_flags=handwritten_flags,
             structured_content_text=form.get("structured_content_json", "{}"),
             reviewer=form.get("reviewer", ""),
             status=PageVerificationStatus(form.get("status", PageVerificationStatus.PENDING.value)),

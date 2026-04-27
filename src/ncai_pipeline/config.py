@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -70,10 +70,90 @@ class ExportRatios(BaseModel):
         return self
 
 
+class ExportAssetSettings(BaseModel):
+    page_strategy: str = "shared_copy"
+
+    @field_validator("page_strategy")
+    @classmethod
+    def validate_page_strategy(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"shared_copy", "reference_working"}:
+            raise ValueError("export assets.page_strategy must be one of: shared_copy, reference_working")
+        return normalized
+
+
+class ExportHandwrittenSettings(BaseModel):
+    auto_detect: bool = True
+    keywords: list[str] = Field(
+        default_factory=lambda: [
+            "handwritten",
+            "handwriting",
+            "hand-written",
+            "written by hand",
+            "manuscript",
+            "دستی",
+            "دستخط",
+            "تحریر",
+        ]
+    )
+    crop_padding: int = 24
+
+    @field_validator("crop_padding")
+    @classmethod
+    def validate_crop_padding(cls, value: int) -> int:
+        if value < 0:
+            raise ValueError("export handwritten.crop_padding must be greater than or equal to 0")
+        return value
+
+
 class ExportSettings(BaseModel):
     instruction: str = "Extract the document faithfully in original Urdu script and return structured JSON."
     split_ratios: ExportRatios = Field(default_factory=ExportRatios)
     target_format: str = "gemma_multimodal_jsonl"
+    dataset_types: list[str] = Field(default_factory=lambda: ["full"])
+    output_formats: list[str] = Field(default_factory=lambda: ["jsonl"])
+    region_source: str = "blocks"
+    assets: ExportAssetSettings = Field(default_factory=ExportAssetSettings)
+    handwritten: ExportHandwrittenSettings = Field(default_factory=ExportHandwrittenSettings)
+
+    @field_validator("dataset_types")
+    @classmethod
+    def validate_dataset_types(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("export dataset_types must include at least one dataset type")
+        valid = {"full", "page_text", "regions", "regions_blocks", "regions_sections", "handwritten"}
+        normalized = []
+        for item in value:
+            dataset_type = item.strip().lower()
+            if dataset_type not in valid:
+                raise ValueError(
+                    "export dataset_types entries must be one of: "
+                    "full, page_text, regions, regions_blocks, regions_sections, handwritten"
+                )
+            normalized.append(dataset_type)
+        return normalized
+
+    @field_validator("output_formats")
+    @classmethod
+    def validate_output_formats(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("export output_formats must include at least one format")
+        valid = {"jsonl", "json", "csv", "xlsx", "excel"}
+        normalized = []
+        for item in value:
+            output_format = item.strip().lower()
+            if output_format not in valid:
+                raise ValueError("export output_formats entries must be one of: jsonl, json, csv, xlsx")
+            normalized.append("xlsx" if output_format == "excel" else output_format)
+        return normalized
+
+    @field_validator("region_source")
+    @classmethod
+    def validate_region_source(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"blocks", "sections"}:
+            raise ValueError("export region_source must be one of: blocks, sections")
+        return normalized
 
 
 class LoggingSettings(BaseModel):
