@@ -42,9 +42,9 @@ export:
     test: 0.1
   target_format: "gemma_multimodal_jsonl"
   dataset_types:
-    - "handwritten"
+    - "page_text"
   output_formats:
-    - "jsonl"
+    - "xlsx"
   region_source: "blocks"
   assets:
     page_strategy: "shared_copy"
