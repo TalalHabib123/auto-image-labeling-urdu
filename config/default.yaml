@@ -1,5 +1,6 @@
 pipeline:
   version: "0.1.0"
+  storage_mode: "local"
   input_dir: "data/input"
   output_root: "data"
   allowed_file_types:
@@ -17,6 +18,41 @@ pipeline:
   concurrency: 1
   prompt_version: "ocr_v1"
   pdf_render_scale: 2.0
+
+nas:
+  input_root:
+  output_root:
+  scratch_root: "data/nas_scratch"
+  share_label:
+  publish_strategy: "local_scratch_atomic"
+  healthcheck:
+    enabled: true
+    timeout_seconds: 10
+    require_writable_output: true
+  retry:
+    attempts: 3
+    backoff_seconds: 2.0
+    max_backoff_seconds: 30.0
+  locks:
+    enabled: true
+    stale_after_minutes: 240
+    heartbeat_seconds: 60
+  timeouts:
+    read_seconds: 120
+    write_seconds: 120
+    publish_seconds: 300
+  input_readiness:
+    enabled: true
+    stable_check_seconds: 5
+    require_ready_marker: false
+    ready_marker_suffix: ".ready"
+  scratch:
+    cleanup_on_success: true
+    keep_failed_runs_days: 14
+    keep_completed_runs_days: 3
+  checksums:
+    verify_after_copy: true
+    verify_after_publish: true
 
 provider:
   name: "gemini"

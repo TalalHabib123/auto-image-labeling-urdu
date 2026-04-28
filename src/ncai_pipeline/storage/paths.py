@@ -69,6 +69,26 @@ class DataPaths:
         return self.working_dir / "status"
 
     @property
+    def locks_dir(self) -> Path:
+        return self.working_dir / "locks"
+
+    @property
+    def completion_markers_dir(self) -> Path:
+        return self.status_dir / "documents"
+
+    @property
+    def run_manifests_dir(self) -> Path:
+        return self.status_dir / "runs"
+
+    @property
+    def staging_dir(self) -> Path:
+        return self.root / ".staging"
+
+    @property
+    def sources_dir(self) -> Path:
+        return self.root / "sources"
+
+    @property
     def reports_dir(self) -> Path:
         return self.review_dir / "reports"
 
@@ -101,6 +121,9 @@ class DataPaths:
             self.raw_responses_dir,
             self.parsed_dir,
             self.status_dir,
+            self.locks_dir,
+            self.completion_markers_dir,
+            self.run_manifests_dir,
             self.reports_dir,
             self.correction_files_dir,
             self.approved_dir,

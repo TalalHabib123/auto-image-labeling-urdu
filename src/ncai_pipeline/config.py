@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 from pydantic import BaseModel, Field, field_validator, model_validator
@@ -27,6 +27,7 @@ class EnvironmentSettings(BaseSettings):
 
 class PipelineSettings(BaseModel):
     version: str = "0.1.0"
+    storage_mode: Literal["local", "nas"] = "local"
     input_dir: str = "data/input"
     output_root: str = "data"
     allowed_file_types: list[str] = Field(default_factory=lambda: [".png", ".jpg", ".jpeg", ".webp", ".tif", ".tiff", ".pdf"])
@@ -37,6 +38,159 @@ class PipelineSettings(BaseModel):
     concurrency: int = 1
     prompt_version: str = "ocr_v1"
     pdf_render_scale: float = 2.0
+
+    @field_validator("storage_mode", mode="before")
+    @classmethod
+    def validate_storage_mode(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
+
+    @field_validator("allowed_file_types")
+    @classmethod
+    def validate_allowed_file_types(cls, value: list[str]) -> list[str]:
+        if not value:
+            raise ValueError("pipeline.allowed_file_types must include at least one extension")
+        normalized = []
+        for item in value:
+            extension = item.strip().lower()
+            if not extension.startswith("."):
+                extension = f".{extension}"
+            if extension not in normalized:
+                normalized.append(extension)
+        return normalized
+
+
+class NasHealthcheckSettings(BaseModel):
+    enabled: bool = True
+    timeout_seconds: int = 10
+    require_writable_output: bool = True
+
+    @field_validator("timeout_seconds")
+    @classmethod
+    def validate_timeout_seconds(cls, value: int) -> int:
+        if value <= 0:
+            raise ValueError("nas.healthcheck.timeout_seconds must be positive")
+        return value
+
+
+class NasRetrySettings(BaseModel):
+    attempts: int = 3
+    backoff_seconds: float = 2.0
+    max_backoff_seconds: float = 30.0
+
+    @model_validator(mode="after")
+    def validate_retry(self) -> "NasRetrySettings":
+        if self.attempts <= 0:
+            raise ValueError("nas.retry.attempts must be positive")
+        if self.backoff_seconds <= 0:
+            raise ValueError("nas.retry.backoff_seconds must be positive")
+        if self.max_backoff_seconds <= 0:
+            raise ValueError("nas.retry.max_backoff_seconds must be positive")
+        if self.max_backoff_seconds < self.backoff_seconds:
+            raise ValueError("nas.retry.max_backoff_seconds must be greater than or equal to backoff_seconds")
+        return self
+
+
+class NasLockSettings(BaseModel):
+    enabled: bool = True
+    stale_after_minutes: int = 240
+    heartbeat_seconds: int = 60
+
+    @model_validator(mode="after")
+    def validate_locks(self) -> "NasLockSettings":
+        if self.stale_after_minutes <= 0:
+            raise ValueError("nas.locks.stale_after_minutes must be positive")
+        if self.heartbeat_seconds <= 0:
+            raise ValueError("nas.locks.heartbeat_seconds must be positive")
+        return self
+
+
+class NasTimeoutSettings(BaseModel):
+    read_seconds: int = 120
+    write_seconds: int = 120
+    publish_seconds: int = 300
+
+    @model_validator(mode="after")
+    def validate_timeouts(self) -> "NasTimeoutSettings":
+        if self.read_seconds <= 0:
+            raise ValueError("nas.timeouts.read_seconds must be positive")
+        if self.write_seconds <= 0:
+            raise ValueError("nas.timeouts.write_seconds must be positive")
+        if self.publish_seconds <= 0:
+            raise ValueError("nas.timeouts.publish_seconds must be positive")
+        return self
+
+
+class NasInputReadinessSettings(BaseModel):
+    enabled: bool = True
+    stable_check_seconds: float = 5.0
+    require_ready_marker: bool = False
+    ready_marker_suffix: str = ".ready"
+
+    @field_validator("stable_check_seconds")
+    @classmethod
+    def validate_stable_check_seconds(cls, value: float) -> float:
+        if value < 0:
+            raise ValueError("nas.input_readiness.stable_check_seconds must be greater than or equal to 0")
+        return value
+
+    @field_validator("ready_marker_suffix")
+    @classmethod
+    def validate_ready_marker_suffix(cls, value: str) -> str:
+        suffix = value.strip()
+        if not suffix:
+            raise ValueError("nas.input_readiness.ready_marker_suffix must not be empty")
+        return suffix
+
+
+class NasScratchSettings(BaseModel):
+    cleanup_on_success: bool = True
+    keep_failed_runs_days: int = 14
+    keep_completed_runs_days: int = 3
+
+    @model_validator(mode="after")
+    def validate_scratch(self) -> "NasScratchSettings":
+        if self.keep_failed_runs_days < 0:
+            raise ValueError("nas.scratch.keep_failed_runs_days must be greater than or equal to 0")
+        if self.keep_completed_runs_days < 0:
+            raise ValueError("nas.scratch.keep_completed_runs_days must be greater than or equal to 0")
+        return self
+
+
+class NasChecksumSettings(BaseModel):
+    verify_after_copy: bool = True
+    verify_after_publish: bool = True
+
+
+class NasSettings(BaseModel):
+    input_root: str | None = None
+    output_root: str | None = None
+    scratch_root: str | None = "data/nas_scratch"
+    share_label: str | None = None
+    publish_strategy: Literal["local_scratch_atomic"] = "local_scratch_atomic"
+    healthcheck: NasHealthcheckSettings = Field(default_factory=NasHealthcheckSettings)
+    retry: NasRetrySettings = Field(default_factory=NasRetrySettings)
+    locks: NasLockSettings = Field(default_factory=NasLockSettings)
+    timeouts: NasTimeoutSettings = Field(default_factory=NasTimeoutSettings)
+    input_readiness: NasInputReadinessSettings = Field(default_factory=NasInputReadinessSettings)
+    scratch: NasScratchSettings = Field(default_factory=NasScratchSettings)
+    checksums: NasChecksumSettings = Field(default_factory=NasChecksumSettings)
+
+    @field_validator("input_root", "output_root", "scratch_root", "share_label")
+    @classmethod
+    def normalize_optional_strings(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        normalized = value.strip()
+        return normalized or None
+
+    @field_validator("publish_strategy", mode="before")
+    @classmethod
+    def normalize_publish_strategy(cls, value: object) -> object:
+        if isinstance(value, str):
+            return value.strip().lower()
+        return value
 
 
 class ProviderSettings(BaseModel):
@@ -177,10 +331,66 @@ class PromptRegistry(BaseModel):
 
 class AppConfig(BaseModel):
     pipeline: PipelineSettings = Field(default_factory=PipelineSettings)
+    nas: NasSettings = Field(default_factory=NasSettings)
     provider: ProviderSettings = Field(default_factory=ProviderSettings)
     review: ReviewSettings = Field(default_factory=ReviewSettings)
     export: ExportSettings = Field(default_factory=ExportSettings)
     logging: LoggingSettings = Field(default_factory=LoggingSettings)
+
+    @model_validator(mode="after")
+    def validate_storage(self) -> "AppConfig":
+        if self.pipeline.storage_mode == "local":
+            if not self.pipeline.input_dir:
+                raise ValueError("pipeline.input_dir is required in local storage mode")
+            if not self.pipeline.output_root:
+                raise ValueError("pipeline.output_root is required in local storage mode")
+            return self
+
+        missing = [
+            name
+            for name, value in {
+                "nas.input_root": self.nas.input_root,
+                "nas.output_root": self.nas.output_root,
+                "nas.scratch_root": self.nas.scratch_root,
+            }.items()
+            if not value
+        ]
+        if missing:
+            raise ValueError(f"{', '.join(missing)} must be configured when pipeline.storage_mode is nas")
+
+        assert self.nas.input_root is not None
+        assert self.nas.output_root is not None
+        assert self.nas.scratch_root is not None
+        input_root = _path_for_compare(self.nas.input_root)
+        output_root = _path_for_compare(self.nas.output_root)
+        scratch_root = _path_for_compare(self.nas.scratch_root)
+
+        if input_root == output_root:
+            raise ValueError("nas.input_root and nas.output_root must not point to the same directory")
+        if _is_relative_to(output_root, input_root):
+            raise ValueError("nas.output_root must not be inside nas.input_root")
+        if _is_relative_to(input_root, output_root):
+            raise ValueError("nas.input_root must not be inside nas.output_root")
+        if _is_relative_to(scratch_root, input_root):
+            raise ValueError("nas.scratch_root must not be inside nas.input_root")
+        if _is_relative_to(scratch_root, output_root):
+            raise ValueError("nas.scratch_root must not be inside nas.output_root")
+        return self
+
+
+def _path_for_compare(value: str) -> Path:
+    path = Path(value).expanduser()
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return Path(str(path)).absolute()
+
+
+def _is_relative_to(child: Path, parent: Path) -> bool:
+    try:
+        child.relative_to(parent)
+        return True
+    except ValueError:
+        return False
 
 
 def _read_yaml(path: Path) -> dict[str, Any]:

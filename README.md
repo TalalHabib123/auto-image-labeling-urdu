@@ -51,6 +51,7 @@ Important settings:
 
 - input directory
 - output root
+- storage mode: `local` by default, or explicit `nas`
 - allowed file types
 - provider name and Gemini model
 - timeout and retry settings
@@ -61,6 +62,24 @@ Important settings:
 - logging level
 
 You can point to a different config file with `NCAI_CONFIG_PATH` or `--config`.
+
+### NAS Storage Mode
+
+Local mode remains the default. To process files from a mounted NAS share, set:
+
+```yaml
+pipeline:
+  storage_mode: "nas"
+
+nas:
+  input_root: "Z:/NCAI/input"
+  output_root: "Z:/NCAI/output"
+  scratch_root: "data/nas_scratch"
+  share_label: "ncai_z_drive"
+  publish_strategy: "local_scratch_atomic"
+```
+
+In NAS mode, source files are discovered from `nas.input_root`, processing happens in local scratch, and complete artifacts are published back to `nas.output_root`. Use UNC paths for production Windows runs when possible.
 
 ## Run Flow
 
@@ -85,6 +104,8 @@ What `run` does:
 5. stores raw request and raw response artifacts
 6. normalizes parsed results into internal schemas
 7. generates a review bundle with YAML + HTML report
+
+In NAS mode, `--input-dir` is ignored and discovery uses `nas.input_root`.
 
 ### 2. Review artifacts
 

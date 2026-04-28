@@ -46,12 +46,20 @@ Important flags:
 - `--dry-run`: build review artifacts without making a live provider call
 - `--config`: load a different YAML config file
 
+NAS mode note:
+
+- set `pipeline.storage_mode: "nas"` and configure `nas.input_root`, `nas.output_root`, and `nas.scratch_root`
+- `--input-dir` is ignored in NAS mode; discovery always uses `nas.input_root`
+- processing uses local scratch first, then publishes complete artifacts to `nas.output_root`
+- document completion is marked by `working/status/documents/<document_id>.complete.json`
+
 Outputs you will see:
 
 - live document progress updates
 - final run summary
 - `data/working/status/latest_run.json`
 - `data/working/status/<run_id>/run_manifest.json`
+- `data/working/status/runs/<run_id>.json`
 
 ## `interactive`
 
@@ -201,6 +209,13 @@ Important flags:
 - `--include-dry-run`: include approved dry-run samples
 - `--config`: load a different YAML config file
 
+NAS mode note:
+
+- approved corrections and rendered pages are read from `nas.output_root`
+- export datasets and assets are assembled in `nas.scratch_root`
+- completed export artifacts are published back to `nas.output_root/exports/`
+- `exports/export_manifest.json` is written last and acts as the export completion marker
+
 Default config equivalent:
 
 ```yaml
@@ -300,3 +315,29 @@ python main.py export --dataset-type full --dataset-type handwritten --format js
 python main.py dry-run-artifacts --action inspect
 python main.py dry-run-artifacts --action delete
 ```
+
+### 7. Run Against A Mounted NAS Share
+
+Example config override:
+
+```yaml
+pipeline:
+  storage_mode: "nas"
+
+nas:
+  input_root: "Z:/NCAI/input"
+  output_root: "Z:/NCAI/output"
+  scratch_root: "data/nas_scratch"
+  share_label: "ncai_z_drive"
+  publish_strategy: "local_scratch_atomic"
+```
+
+Run the same commands:
+
+```powershell
+python main.py run --config config/nas.yaml
+python main.py interactive --ui web --config config/nas.yaml
+python main.py export --config config/nas.yaml
+```
+
+Use UNC paths such as `\\NAS-SERVER\NCAI\input` for production Windows runs. Mapped drives are fine for manual desktop sessions, but may not be visible to services, scheduled tasks, or different user accounts.

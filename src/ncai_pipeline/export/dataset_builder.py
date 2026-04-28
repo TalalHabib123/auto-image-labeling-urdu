@@ -32,9 +32,16 @@ class ApprovedDocument:
 
 
 class DatasetBuilder:
-    def __init__(self, config: AppConfig, data_paths: DataPaths, repository: FileRepository) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        data_paths: DataPaths,
+        repository: FileRepository,
+        source_data_paths: DataPaths | None = None,
+    ) -> None:
         self.config = config
         self.data_paths = data_paths
+        self.source_data_paths = source_data_paths or data_paths
         self.repository = repository
         self._asset_counts: Counter[str] = Counter()
         self._skipped_counts: Counter[str] = Counter()
@@ -43,7 +50,7 @@ class DatasetBuilder:
 
     def load_review_records(self) -> list[ReviewRecord]:
         records: list[ReviewRecord] = []
-        for path in sorted(self.data_paths.status_dir.glob("*/review_record.json")):
+        for path in sorted(self.source_data_paths.status_dir.glob("*/review_record.json")):
             records.append(ReviewRecord.model_validate(self.repository.read_json(path)))
         return records
 
@@ -356,7 +363,7 @@ class DatasetBuilder:
         )
 
     def _page_asset_path(self, document_id: str, page_number: int) -> Path:
-        source = self.data_paths.rendered_pages_dir / document_id / f"page_{page_number:04d}.png"
+        source = self.source_data_paths.rendered_pages_dir / document_id / f"page_{page_number:04d}.png"
         if self.config.export.assets.page_strategy == "reference_working":
             return source
         target = self.data_paths.export_page_assets_dir / document_id / f"page_{page_number:04d}.png"
@@ -379,7 +386,7 @@ class DatasetBuilder:
     ) -> Path | None:
         if not self._has_bbox(bbox):
             return None
-        source = self.data_paths.rendered_pages_dir / document_id / f"page_{page_number:04d}.png"
+        source = self.source_data_paths.rendered_pages_dir / document_id / f"page_{page_number:04d}.png"
         if not source.exists():
             return None
         target = (

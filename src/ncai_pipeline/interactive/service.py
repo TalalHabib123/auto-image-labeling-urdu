@@ -3,10 +3,11 @@ from __future__ import annotations
 import io
 import json
 import textwrap
+from contextlib import contextmanager
 from dataclasses import dataclass
 from html import escape
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from PIL import Image
 
@@ -28,6 +29,7 @@ from ncai_pipeline.schemas.review import (
     PageVerificationStatus,
     ReviewRecord,
 )
+from ncai_pipeline.storage.locks import document_lock
 from ncai_pipeline.storage.paths import DataPaths
 from ncai_pipeline.storage.repository import FileRepository
 from ncai_pipeline.utils.time import utc_now, utc_now_iso
@@ -122,17 +124,48 @@ class InteractiveReviewService:
         repository: FileRepository,
         parser_provider: ExtractionProvider | None = None,
         report_title: str = "NCAI OCR Review",
+        storage_mode: str = "local",
+        locks_enabled: bool = False,
+        lock_stale_after_minutes: int = 240,
     ) -> None:
         self.data_paths = data_paths
         self.repository = repository
         self.parser_provider = parser_provider or GeminiProvider(ProviderSettings(), EnvironmentSettings())
         self.report_title = report_title
+        self.storage_mode = storage_mode
+        self.locks_enabled = locks_enabled
+        self.lock_stale_after_minutes = lock_stale_after_minutes
+
+    @contextmanager
+    def _document_write_lock(self, document_id: str) -> Iterator[None]:
+        with document_lock(
+            self.data_paths.locks_dir,
+            document_id,
+            self.repository,
+            stale_after_minutes=self.lock_stale_after_minutes,
+            enabled=self.storage_mode == "nas" and self.locks_enabled,
+        ):
+            yield
 
     def load_latest_run_summary(self) -> dict[str, Any] | None:
         path = self.data_paths.status_dir / "latest_run.json"
-        if not path.exists():
-            return None
-        return self.repository.read_json(path)
+        if path.exists():
+            return self.repository.read_json(path)
+        run_manifests = sorted(
+            self.data_paths.run_manifests_dir.glob("*.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if run_manifests:
+            return self.repository.read_json(run_manifests[0])
+        legacy_manifests = sorted(
+            self.data_paths.status_dir.glob("*/run_manifest.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        if legacy_manifests:
+            return self.repository.read_json(legacy_manifests[0])
+        return None
 
     def load_latest_export_summary(self) -> dict[str, Any] | None:
         path = self.data_paths.exports_dir / "export_manifest.json"
@@ -756,11 +789,12 @@ class InteractiveReviewService:
             review_record.review_status = status
 
     def _save_corrected_bundle(self, review_record: ReviewRecord, corrected: CorrectedDocument) -> None:
-        corrected_path = Path(review_record.corrected_output_path)
-        review_record_path = self.data_paths.status_dir / corrected.document_id / "review_record.json"
-        self.repository.write_yaml(corrected_path, corrected)
-        self._refresh_review_report(review_record, corrected)
-        self.repository.write_json(review_record_path, review_record)
+        with self._document_write_lock(corrected.document_id):
+            corrected_path = Path(review_record.corrected_output_path)
+            review_record_path = self.data_paths.status_dir / corrected.document_id / "review_record.json"
+            self.repository.write_yaml(corrected_path, corrected)
+            self._refresh_review_report(review_record, corrected)
+            self.repository.write_json(review_record_path, review_record)
 
     def _refresh_review_report(self, review_record: ReviewRecord, corrected: CorrectedDocument) -> None:
         page_image_paths = [
@@ -790,9 +824,10 @@ class InteractiveReviewService:
         manifest = DocumentManifest.model_validate(payload)
         desired_status = self._pipeline_status_from_review(corrected)
         if manifest.status != desired_status:
-            manifest.status = desired_status
-            manifest.updated_at = utc_now()
-            self.repository.write_json(manifest_path, manifest)
+            with self._document_write_lock(document_id):
+                manifest.status = desired_status
+                manifest.updated_at = utc_now()
+                self.repository.write_json(manifest_path, manifest)
         return manifest
 
     def _pipeline_status_from_review(self, corrected: CorrectedDocument) -> PipelineStatus:

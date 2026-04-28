@@ -10,7 +10,7 @@ from ncai_pipeline.schemas.extraction import NormalizedExtraction
 
 
 def normalize_document(manifest: DocumentManifest, rendered_pages_dir: Path, settings: PipelineSettings) -> list[PageArtifact]:
-    source_path = Path(manifest.source_path)
+    source_path = Path(manifest.scratch_source_path or manifest.source_path)
     if manifest.file_type == "image":
         return normalize_image(manifest.document_id, source_path, rendered_pages_dir)
     if manifest.file_type == "pdf":
@@ -20,4 +20,3 @@ def normalize_document(manifest: DocumentManifest, rendered_pages_dir: Path, set
 
 def consolidate_text(extractions: list[NormalizedExtraction]) -> str:
     return "\n\n".join(item.full_text.strip() for item in extractions if item.full_text.strip())
-

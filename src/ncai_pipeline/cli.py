@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import Counter
-from pathlib import Path
 from typing import Annotated, Any, Callable
 
 import typer
@@ -13,14 +12,23 @@ from ncai_pipeline.interactive.service import InteractiveReviewService
 from ncai_pipeline.interactive.tui import run_terminal_dashboard
 from ncai_pipeline.interactive.web import serve_web_ui
 from ncai_pipeline.observability.logging_config import configure_logging
+from ncai_pipeline.observability.tracing import create_run_context
 from ncai_pipeline.parsing.validators import load_corrected_document
 from ncai_pipeline.pipeline.dry_run_manager import DryRunArtifactManager
 from ncai_pipeline.pipeline.orchestrator import PipelineOrchestrator
 from ncai_pipeline.providers.factory import build_provider
 from ncai_pipeline.schemas.common import ReviewStatus
 from ncai_pipeline.schemas.review import ReviewRecord
+from ncai_pipeline.storage.locks import export_lock
+from ncai_pipeline.storage.nas import (
+    cleanup_successful_scratch,
+    healthcheck_nas_paths,
+    publish_export_artifacts,
+    retain_failed_scratch,
+)
 from ncai_pipeline.storage.paths import DataPaths
 from ncai_pipeline.storage.repository import FileRepository
+from ncai_pipeline.storage.runtime import resolve_storage_runtime
 
 
 app = typer.Typer(add_completion=False, help="NCAI OCR extraction and curation pipeline")
@@ -28,15 +36,29 @@ app = typer.Typer(add_completion=False, help="NCAI OCR extraction and curation p
 
 def _load_runtime(config_path: str | None = None) -> tuple[AppConfig, DataPaths, FileRepository]:
     config = load_app_config(config_path)
-    data_paths = DataPaths(Path(config.pipeline.output_root))
+    runtime = resolve_storage_runtime(config)
+    data_paths = runtime.final_paths
     repository = FileRepository()
-    data_paths.ensure()
+    if runtime.is_nas:
+        data_paths.status_dir.mkdir(parents=True, exist_ok=True)
+        data_paths.locks_dir.mkdir(parents=True, exist_ok=True)
+        data_paths.run_manifests_dir.mkdir(parents=True, exist_ok=True)
+        data_paths.completion_markers_dir.mkdir(parents=True, exist_ok=True)
+    else:
+        data_paths.ensure()
     configure_logging(config.logging.level, data_paths.status_dir / "pipeline.log")
     return config, data_paths, repository
 
 
 def _build_review_service(config: AppConfig, data_paths: DataPaths, repository: FileRepository) -> InteractiveReviewService:
-    return InteractiveReviewService(data_paths, repository, report_title=config.review.report_title)
+    return InteractiveReviewService(
+        data_paths,
+        repository,
+        report_title=config.review.report_title,
+        storage_mode=config.pipeline.storage_mode,
+        locks_enabled=config.nas.locks.enabled,
+        lock_stale_after_minutes=config.nas.locks.stale_after_minutes,
+    )
 
 
 def _write_exports(
@@ -49,53 +71,101 @@ def _write_exports(
     region_source: str | None = None,
     progress_callback: Callable[[dict[str, Any]], None] | None = None,
 ) -> tuple[int, dict[str, Any], object]:
-    builder = DatasetBuilder(config, data_paths, repository)
+    runtime = resolve_storage_runtime(config)
+    final_paths = data_paths
+    write_paths = data_paths
+    run_id: str | None = None
+    if runtime.is_nas:
+        healthcheck_nas_paths(config.nas, repository)
+        run_id = create_run_context().run_id
+        runtime = runtime.for_run(run_id)
+        assert runtime.scratch_paths is not None
+        assert runtime.scratch_root is not None
+        write_paths = runtime.scratch_paths
+        write_paths.ensure()
+
+    builder = DatasetBuilder(
+        config,
+        write_paths,
+        repository,
+        source_data_paths=final_paths if runtime.is_nas else None,
+    )
     requested_dataset_types = dataset_types or config.export.dataset_types
     requested_formats = _normalize_output_formats(output_formats or config.export.output_formats)
     requested_region_source = region_source or config.export.region_source
-    datasets, manifest = builder.build_datasets(
-        dataset_types=requested_dataset_types,
-        region_source=requested_region_source,
-        include_dry_run=include_dry_run,
-        progress_callback=progress_callback,
-    )
-    dataset_ids = normalize_dataset_ids(requested_dataset_types, requested_region_source)
-    files: dict[str, Any] = {}
-    split_names = ["train", "val", "test"]
-    extension_map = {"jsonl": "jsonl", "json": "json", "csv": "csv", "xlsx": "xlsx"}
+    try:
+        lock_context = export_lock(
+            final_paths.locks_dir,
+            repository,
+            run_id=run_id,
+            stale_after_minutes=config.nas.locks.stale_after_minutes,
+            enabled=runtime.is_nas and config.nas.locks.enabled,
+        )
+        with lock_context:
+            datasets, manifest = builder.build_datasets(
+                dataset_types=requested_dataset_types,
+                region_source=requested_region_source,
+                include_dry_run=include_dry_run,
+                progress_callback=progress_callback,
+            )
+            dataset_ids = normalize_dataset_ids(requested_dataset_types, requested_region_source)
+            files: dict[str, Any] = {}
+            split_names = ["train", "val", "test"]
+            extension_map = {"jsonl": "jsonl", "json": "json", "csv": "csv", "xlsx": "xlsx"}
 
-    for dataset_id in dataset_ids:
-        files[dataset_id] = {}
-        records = datasets.get(dataset_id, [])
-        for output_format in requested_formats:
-            format_dir = data_paths.export_datasets_dir / dataset_id / output_format
-            format_files: dict[str, str] = {}
-            for split_name in split_names:
-                split_records = [record for record in records if record.get("source_split") == split_name]
-                file_path = format_dir / f"{split_name}.{extension_map[output_format]}"
-                write_records(file_path, split_records, output_format)
-                format_files[split_name] = str(file_path)
-            files[dataset_id][output_format] = format_files
-            format_manifest = manifest.model_copy(deep=True)
-            format_manifest.dataset_id = dataset_id
-            format_manifest.output_format = output_format
-            format_manifest.dataset_types = [dataset_id]
-            format_manifest.output_formats = [output_format]
-            format_manifest.samples = len(records)
-            format_manifest.files = format_files
-            repository.write_json(format_dir / "export_manifest.json", format_manifest)
+            for dataset_id in dataset_ids:
+                files[dataset_id] = {}
+                records = datasets.get(dataset_id, [])
+                for output_format in requested_formats:
+                    format_dir = write_paths.export_datasets_dir / dataset_id / output_format
+                    format_files: dict[str, str] = {}
+                    for split_name in split_names:
+                        split_records = [record for record in records if record.get("source_split") == split_name]
+                        file_path = format_dir / f"{split_name}.{extension_map[output_format]}"
+                        write_records(file_path, split_records, output_format)
+                        format_files[split_name] = str(file_path)
+                    files[dataset_id][output_format] = format_files
+                    format_manifest = manifest.model_copy(deep=True)
+                    format_manifest.dataset_id = dataset_id
+                    format_manifest.output_format = output_format
+                    format_manifest.dataset_types = [dataset_id]
+                    format_manifest.output_formats = [output_format]
+                    format_manifest.samples = len(records)
+                    format_manifest.files = format_files
+                    repository.write_json(format_dir / "export_manifest.json", format_manifest)
 
-    manifest.dataset_types = dataset_ids
-    manifest.output_formats = requested_formats
-    manifest.files = files
-    manifest.stats.format_counts = {
-        output_format: sum(len(records) for records in datasets.values())
-        for output_format in requested_formats
-    }
-    repository.write_json(data_paths.exports_dir / "export_manifest.json", manifest)
+            manifest.dataset_types = dataset_ids
+            manifest.output_formats = requested_formats
+            manifest.files = files
+            manifest.stats.format_counts = {
+                output_format: sum(len(records) for records in datasets.values())
+                for output_format in requested_formats
+            }
+            repository.write_json(write_paths.exports_dir / "export_manifest.json", manifest)
 
-    if "full" in datasets and "jsonl" in requested_formats:
-        _write_legacy_full_jsonl_aliases(data_paths, repository, datasets["full"], manifest)
+            if "full" in datasets and "jsonl" in requested_formats:
+                _write_legacy_full_jsonl_aliases(write_paths, repository, datasets["full"], manifest)
+
+            if runtime.is_nas:
+                assert run_id is not None
+                publish_export_artifacts(
+                    run_id=run_id,
+                    scratch_paths=write_paths,
+                    final_paths=final_paths,
+                    repository=repository,
+                    verify_checksums=config.nas.checksums.verify_after_publish,
+                )
+    except Exception:
+        if runtime.is_nas:
+            assert run_id is not None
+            assert runtime.scratch_root is not None
+            retain_failed_scratch(runtime.scratch_root, run_id, repository)
+        raise
+    else:
+        if runtime.is_nas:
+            assert run_id is not None
+            assert runtime.scratch_root is not None
+            cleanup_successful_scratch(runtime.scratch_root, run_id, config.nas, repository)
 
     return manifest.samples, files, manifest
 
