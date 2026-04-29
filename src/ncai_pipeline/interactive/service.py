@@ -657,10 +657,10 @@ class InteractiveReviewService:
         if fragment is None or not fragment.has_bbox:
             raise FileNotFoundError(f"No crop is available for fragment {fragment_id}.")
 
-        left = max(int(fragment.bbox.left or 0) - 24, 0)
-        top = max(int(fragment.bbox.top or 0) - 24, 0)
-        right = min(int(fragment.bbox.right or context.page_image_width) + 24, context.page_image_width)
-        bottom = min(int(fragment.bbox.bottom or context.page_image_height) + 24, context.page_image_height)
+        left = max(int(fragment.bbox.left or 0) - 24, 0) # type: ignore
+        top = max(int(fragment.bbox.top or 0) - 24, 0) # type: ignore
+        right = min(int(fragment.bbox.right or context.page_image_width) + 24, context.page_image_width) # type: ignore
+        bottom = min(int(fragment.bbox.bottom or context.page_image_height) + 24, context.page_image_height) # type: ignore
         if right <= left or bottom <= top:
             raise FileNotFoundError(f"No crop is available for fragment {fragment_id}.")
 
@@ -1030,10 +1030,10 @@ class InteractiveReviewService:
         if None in {bbox.left, bbox.top, bbox.right, bbox.bottom}:
             raise ValueError("Bounding boxes must include left, top, right, and bottom.")
 
-        left = self._clamp_coordinate(float(bbox.left), 0.0, float(page_width))
-        right = self._clamp_coordinate(float(bbox.right), 0.0, float(page_width))
-        top = self._clamp_coordinate(float(bbox.top), 0.0, float(page_height))
-        bottom = self._clamp_coordinate(float(bbox.bottom), 0.0, float(page_height))
+        left = self._clamp_coordinate(float(bbox.left), 0.0, float(page_width)) # type: ignore
+        right = self._clamp_coordinate(float(bbox.right), 0.0, float(page_width)) # type: ignore
+        top = self._clamp_coordinate(float(bbox.top), 0.0, float(page_height)) # type: ignore
+        bottom = self._clamp_coordinate(float(bbox.bottom), 0.0, float(page_height)) # type: ignore
         normalized_left, normalized_right = sorted((left, right))
         normalized_top, normalized_bottom = sorted((top, bottom))
         return BoundingBox(
