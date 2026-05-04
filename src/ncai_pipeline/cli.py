@@ -122,7 +122,7 @@ def _write_exports(
                     for split_name in split_names:
                         split_records = [record for record in records if record.get("source_split") == split_name]
                         file_path = format_dir / f"{split_name}.{extension_map[output_format]}"
-                        write_records(file_path, split_records, output_format)
+                        write_records(file_path, split_records, output_format) # type: ignore
                         format_files[split_name] = str(file_path)
                     files[dataset_id][output_format] = format_files
                     format_manifest = manifest.model_copy(deep=True)
@@ -131,7 +131,7 @@ def _write_exports(
                     format_manifest.dataset_types = [dataset_id]
                     format_manifest.output_formats = [output_format]
                     format_manifest.samples = len(records)
-                    format_manifest.files = format_files
+                    format_manifest.files = format_files # type: ignore
                     repository.write_json(format_dir / "export_manifest.json", format_manifest)
 
             manifest.dataset_types = dataset_ids
@@ -193,19 +193,18 @@ def _write_legacy_full_jsonl_aliases(
     for split_name in ["train", "val", "test"]:
         split_records = [record for record in records if record.get("source_split") == split_name]
         file_path = data_paths.export_target_dir / f"{split_name}.jsonl"
-        write_records(file_path, split_records, "jsonl")
+        write_records(file_path, split_records, "jsonl") # type: ignore
         files[split_name] = str(file_path)
-    legacy_manifest = manifest.model_copy(deep=True) if hasattr(manifest, "model_copy") else manifest
-    legacy_manifest.files = files
-    legacy_manifest.dataset_types = ["full"]
-    legacy_manifest.output_formats = ["jsonl"]
-    legacy_manifest.dataset_id = "full"
-    legacy_manifest.output_format = "jsonl"
-    legacy_manifest.samples = len(records)
-    legacy_manifest.stats.dataset_counts = {"full": len(records)}
-    legacy_manifest.stats.format_counts = {"jsonl": len(records)}
-    repository.write_json(data_paths.export_target_dir / "export_manifest.json", legacy_manifest)
-
+    legacy_manifest = manifest.model_copy(deep=True) if hasattr(manifest, "model_copy") else manifest # pyright: ignore[reportAttributeAccessIssue]
+    legacy_manifest.files = files # pyright: ignore[reportAttributeAccessIssue]
+    legacy_manifest.dataset_types = ["full"] # pyright: ignore[reportAttributeAccessIssue]
+    legacy_manifest.output_formats = ["jsonl"] # pyright: ignore[reportAttributeAccessIssue]
+    legacy_manifest.dataset_id = "full" # pyright: ignore[reportAttributeAccessIssue]
+    legacy_manifest.output_format = "jsonl" # pyright: ignore[reportAttributeAccessIssue]
+    legacy_manifest.samples = len(records) # pyright: ignore[reportAttributeAccessIssue]
+    legacy_manifest.stats.dataset_counts = {"full": len(records)} # pyright: ignore[reportAttributeAccessIssue]
+    legacy_manifest.stats.format_counts = {"jsonl": len(records)} # pyright: ignore[reportAttributeAccessIssue]
+    repository.write_json(data_paths.export_target_dir / "export_manifest.json", legacy_manifest)  # type: ignore
 
 def _format_document_entry(entry: dict[str, Any]) -> str:
     detail_parts = [

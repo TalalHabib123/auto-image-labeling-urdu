@@ -341,3 +341,12 @@ python main.py export --config config/nas.yaml
 ```
 
 Use UNC paths such as `\\NAS-SERVER\NCAI\input` for production Windows runs. Mapped drives are fine for manual desktop sessions, but may not be visible to services, scheduled tasks, or different user accounts.
+
+
+# Main Commands
+
+```powershell
+python main.py run --config config/default.yaml --force  
+python main.py interactive --ui web --config config/default.yaml    
+python main.py export --config config/default.yaml 
+```

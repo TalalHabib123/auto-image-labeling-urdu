@@ -1,8 +1,8 @@
 pipeline:
   version: "0.1.0"
-  storage_mode: "local"
-  input_dir: "data/input"
-  output_root: "data"
+  storage_mode: "nas"
+  input_dir: '\\10.12.96.55\Development\NAB_Development\Talal\input'
+  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder'
   allowed_file_types:
     - ".png"
     - ".jpg"
@@ -20,9 +20,9 @@ pipeline:
   pdf_render_scale: 2.0
 
 nas:
-  input_root:
-  output_root:
-  scratch_root: "data/nas_scratch"
+  input_root: '\\10.12.96.55\Development\NAB_Development\Talal\input'
+  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder'
+  scratch_root: '.\temp\nas_scratch'
   share_label:
   publish_strategy: "local_scratch_atomic"
   healthcheck:
