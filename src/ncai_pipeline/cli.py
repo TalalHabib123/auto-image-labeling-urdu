@@ -306,7 +306,7 @@ def _emit_run_summary(summary: dict[str, Any], data_paths: DataPaths) -> None:
 
     nas_metadata = summary.get("nas") if isinstance(summary.get("nas"), dict) else {}
     run_id = str(summary["run_id"])
-    if summary.get("storage_mode") == "nas" and nas_metadata.get("publish_strategy") == CREATE_ONLY_PUBLISH_STRATEGY:
+    if summary.get("storage_mode") == "nas" and nas_metadata.get("publish_strategy") == CREATE_ONLY_PUBLISH_STRATEGY: #type: ignore
         typer.echo(f"Latest run status: derived from {data_paths.run_manifests_dir}")
         typer.echo(f"Run manifest: {data_paths.run_manifests_dir / f'{run_id}.json'}")
     else:

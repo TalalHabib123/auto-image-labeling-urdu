@@ -2,7 +2,7 @@ pipeline:
   version: "0.1.0"
   storage_mode: "nas"
   input_dir: '\\10.12.96.55\Development\NAB_Development\Talal\input'
-  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder'
+  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder\Final_Test'
   allowed_file_types:
     - ".png"
     - ".jpg"
@@ -21,10 +21,10 @@ pipeline:
 
 nas:
   input_root: '\\10.12.96.55\Development\NAB_Development\Talal\input'
-  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder\Modified_Pipeline'
+  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder\Final_Test'
   scratch_root: '.\temp\nas_scratch'
   share_label:
-  publish_strategy: "local_scratch_create_only"
+  publish_strategy: "local_scratch_create_only" # local_scratch_create_only, local_scratch_atomic
   healthcheck:
     enabled: true
     timeout_seconds: 10
@@ -78,10 +78,10 @@ export:
     test: 0.1
   target_format: "gemma_multimodal_jsonl"
   dataset_types:
-    - "handwritten" 
+    - "page_text"    # handwritten, regions, full, page_text
   output_formats:
-    - "jsonl"
-  region_source: "blocks"
+    - "jsonl"   # jsonl, csv, json
+  region_source: "blocks"   # blocks, sections
   assets:
     page_strategy: "shared_copy"
   handwritten:
