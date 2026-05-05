@@ -22,7 +22,9 @@ from ncai_pipeline.schemas.review import CorrectedDocument, ReviewRecord
 from ncai_pipeline.storage.locks import LockConflictError, document_lock, status_lock
 from ncai_pipeline.storage.manifests import ManifestStore
 from ncai_pipeline.storage.nas import (
+    CREATE_ONLY_PUBLISH_STRATEGY,
     NAS_ERROR_CATEGORIES,
+    NasOutputIndex,
     NasStorageError,
     cleanup_successful_scratch,
     copy_source_to_scratch,
@@ -31,12 +33,14 @@ from ncai_pipeline.storage.nas import (
     ignored_source_path,
     make_input_readiness_checker,
     nas_document_is_complete,
+    nas_document_is_complete_create_only,
     publish_document_artifacts,
+    publish_document_artifacts_create_only,
     required_document_artifacts,
     retain_failed_scratch,
     retry_operation,
 )
-from ncai_pipeline.storage.paths import DataPaths
+from ncai_pipeline.storage.paths import DataPaths, NasDocumentVersionPaths
 from ncai_pipeline.storage.raw_store import RawArtifactStore
 from ncai_pipeline.storage.repository import FileRepository
 from ncai_pipeline.storage.runtime import resolve_storage_runtime
@@ -303,6 +307,7 @@ class PipelineOrchestrator:
         assert runtime.scratch_root is not None
         final_paths = runtime.final_paths
         scratch_paths = runtime.scratch_paths
+        create_only_publish = self.config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY
         final_paths.ensure()
         scratch_paths.ensure()
         scratch_paths.sources_dir.mkdir(parents=True, exist_ok=True)
@@ -327,6 +332,7 @@ class PipelineOrchestrator:
         total_documents = len(manifests)
         completed_documents = 0
         final_manifest_store = ManifestStore(self.repository, final_paths.manifests_dir)
+        output_index = NasOutputIndex(final_paths, self.repository) if create_only_publish else None
 
         if progress_callback is not None:
             progress_callback(
@@ -339,13 +345,24 @@ class PipelineOrchestrator:
 
         for manifest in manifests:
             required_artifacts = required_document_artifacts(manifest.document_id)
-            existing = final_manifest_store.load(manifest.document_id)
-            is_complete = nas_document_is_complete(
-                final_paths,
-                manifest.document_id,
-                self.repository,
-                required_artifacts=required_artifacts,
-            )
+            if create_only_publish:
+                assert output_index is not None
+                existing_payload = output_index.latest_manifest(manifest.document_id)
+                existing = DocumentManifest.model_validate(existing_payload) if existing_payload else None
+                is_complete = nas_document_is_complete_create_only(
+                    final_paths,
+                    manifest.document_id,
+                    self.repository,
+                    source_sha256=manifest.source_sha256 or manifest.sha256,
+                )
+            else:
+                existing = final_manifest_store.load(manifest.document_id)
+                is_complete = nas_document_is_complete(
+                    final_paths,
+                    manifest.document_id,
+                    self.repository,
+                    required_artifacts=required_artifacts,
+                )
             if self.state_manager.should_skip(existing, force, self.config.pipeline.skip_completed) and is_complete:
                 metrics.increment("skipped_documents")
                 completed_documents += 1
@@ -397,28 +414,44 @@ class PipelineOrchestrator:
                     manifest.scratch_source_sha256 = scratch_sha256
                     with self._using_data_paths(scratch_paths):
                         processed_manifest = self._process_document(manifest, prompt_bundle, effective_dry_run, metrics)
-                    self._prepare_nas_artifacts_for_publish(
-                        processed_manifest,
-                        scratch_paths=scratch_paths,
-                        final_paths=final_paths,
-                    )
-                    completion_payload = document_completion_payload(
-                        document_id=manifest.document_id,
-                        run_id=run_id,
-                        final_paths=final_paths,
-                        required_artifacts=required_artifacts,
-                        checksums_verified=self.config.nas.checksums.verify_after_publish,
-                    )
-                    publish_document_artifacts(
-                        run_id=run_id,
-                        document_id=manifest.document_id,
-                        scratch_paths=scratch_paths,
-                        final_paths=final_paths,
-                        repository=self.repository,
-                        required_artifacts=required_artifacts,
-                        completion_payload=completion_payload,
-                        verify_checksums=self.config.nas.checksums.verify_after_publish,
-                    )
+                    if create_only_publish:
+                        self._prepare_nas_artifacts_for_publish_create_only(
+                            processed_manifest,
+                            run_id=run_id,
+                            scratch_paths=scratch_paths,
+                            final_paths=final_paths,
+                        )
+                        publish_document_artifacts_create_only(
+                            run_id=run_id,
+                            document_id=manifest.document_id,
+                            scratch_paths=scratch_paths,
+                            final_paths=final_paths,
+                            repository=self.repository,
+                            verify_checksums=self.config.nas.checksums.verify_after_publish,
+                        )
+                    else:
+                        self._prepare_nas_artifacts_for_publish(
+                            processed_manifest,
+                            scratch_paths=scratch_paths,
+                            final_paths=final_paths,
+                        )
+                        completion_payload = document_completion_payload(
+                            document_id=manifest.document_id,
+                            run_id=run_id,
+                            final_paths=final_paths,
+                            required_artifacts=required_artifacts,
+                            checksums_verified=self.config.nas.checksums.verify_after_publish,
+                        )
+                        publish_document_artifacts(
+                            run_id=run_id,
+                            document_id=manifest.document_id,
+                            scratch_paths=scratch_paths,
+                            final_paths=final_paths,
+                            repository=self.repository,
+                            required_artifacts=required_artifacts,
+                            completion_payload=completion_payload,
+                            verify_checksums=self.config.nas.checksums.verify_after_publish,
+                        )
                 completed_documents += 1
                 if progress_callback is not None:
                     progress_callback(
@@ -437,7 +470,8 @@ class PipelineOrchestrator:
                     scratch_paths=scratch_paths,
                     exc=exc,
                 )
-                final_manifest_store.save(manifest)
+                if not create_only_publish:
+                    final_manifest_store.save(manifest)
                 entry = self._nas_failure_entry(manifest, exc)
                 if manifest.status == PipelineStatus.NEEDS_RETRY:
                     documents_needing_retry.append(entry)
@@ -461,7 +495,8 @@ class PipelineOrchestrator:
             except Exception as exc:  # noqa: BLE001
                 LOGGER.exception("NAS document processing failed for %s", manifest.document_id)
                 manifest = self._nas_failure_manifest(manifest, scratch_paths=scratch_paths, exc=exc)
-                final_manifest_store.save(manifest)
+                if not create_only_publish:
+                    final_manifest_store.save(manifest)
                 entry = self._nas_failure_entry(manifest, exc)
                 if manifest.status == PipelineStatus.FAILED:
                     documents_failed.append(entry)
@@ -553,6 +588,9 @@ class PipelineOrchestrator:
         return manifest
 
     def _write_run_summary(self, data_paths: DataPaths, run_id: str, summary: dict[str, object]) -> None:
+        if self.config.pipeline.storage_mode == "nas" and self.config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY:
+            self.repository.create_json(data_paths.run_manifests_dir / f"{run_id}.json", summary)
+            return
         lock_enabled = self.config.pipeline.storage_mode == "nas" and self.config.nas.locks.enabled
         stale_after = self.config.nas.locks.stale_after_minutes if self.config.pipeline.storage_mode == "nas" else 240
         with status_lock(
@@ -601,6 +639,46 @@ class PipelineOrchestrator:
             extractions=corrected.extracted_pages,
             corrected=corrected,
             correction_path=Path(review_record.corrected_output_path),
+        )
+        self.repository.write_text(scratch_paths.reports_dir / manifest.document_id / "report.html", report_html)
+
+    def _prepare_nas_artifacts_for_publish_create_only(
+        self,
+        manifest: DocumentManifest,
+        *,
+        run_id: str,
+        scratch_paths: DataPaths,
+        final_paths: DataPaths,
+    ) -> None:
+        version_paths = NasDocumentVersionPaths(final_paths.root, manifest.document_id, run_id)
+        manifest.published_at = utc_now()
+        manifest.artifact_version = 1
+        manifest.completion_marker_path = str(version_paths.completion_marker_path)
+        self.repository.write_json(scratch_paths.manifests_dir / manifest.document_id / "manifest.json", manifest)
+
+        review_record_path = scratch_paths.status_dir / manifest.document_id / "review_record.json"
+        review_record = ReviewRecord.model_validate(self.repository.read_json(review_record_path))
+        review_record.corrected_output_path = str(version_paths.correction_path)
+        review_record.raw_output_path = str(version_paths.raw_responses_dir)
+        review_record.report_path = str(version_paths.report_path)
+        self.repository.write_json(review_record_path, review_record)
+
+        corrected = CorrectedDocument.model_validate(
+            self.repository.read_yaml(scratch_paths.correction_files_dir / manifest.document_id / "corrected.yaml")
+        )
+        raw_records = self._load_raw_records_for_publish(scratch_paths, manifest.document_id)
+        page_image_paths = [
+            version_paths.rendered_pages_dir / f"page_{(page.page_number or index):04d}.png"
+            for index, page in enumerate(corrected.extracted_pages, start=1)
+        ]
+        report_html = render_review_report(
+            title=self.config.review.report_title,
+            document_id=manifest.document_id,
+            page_image_paths=page_image_paths,
+            raw_records=raw_records,
+            extractions=corrected.extracted_pages,
+            corrected=corrected,
+            correction_path=version_paths.correction_path,
         )
         self.repository.write_text(scratch_paths.reports_dir / manifest.document_id / "report.html", report_html)
 

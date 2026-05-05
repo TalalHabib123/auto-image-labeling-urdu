@@ -193,13 +193,16 @@ What it does:
 - assigns deterministic train/val/test splits
 - copies whole-page images once into shared export assets
 - generates handwritten block crops when requested
-- writes `sample.json` files and selected dataset exports
-- writes per-format manifests and `data/exports/export_manifest.json`
+- skips whole-page export assets when `handwritten` is the only selected dataset type
+- writes `sample.json` files and selected dataset exports in local/atomic modes
+- writes per-format manifests and `data/exports/export_manifest.json` in local/atomic modes
+- writes one run-level `export_manifest.json` in NAS create-only mode
 
 You will see:
 
 - live review-record export progress
 - final export count summary
+- the create-only NAS export run id, export folder, and manifest path when that mode is active
 
 Important flags:
 
@@ -213,8 +216,10 @@ NAS mode note:
 
 - approved corrections and rendered pages are read from `nas.output_root`
 - export datasets and assets are assembled in `nas.scratch_root`
-- completed export artifacts are published back to `nas.output_root/exports/`
-- `exports/export_manifest.json` is written last and acts as the export completion marker
+- atomic NAS mode publishes completed artifacts back to `nas.output_root/exports/`
+- create-only NAS mode publishes to `exports/runs/export_<timestamp>_<datasets>_<formats>_<id>/`
+- create-only NAS mode writes `exports/completed/<export_run_id>.complete.json` last instead of replacing `exports/export_manifest.json`
+- dataset media paths are relative to the export folder, such as `assets/pages/<document_id>/page_0001.png`
 
 Default config equivalent:
 
@@ -243,6 +248,20 @@ data/exports/
 ```
 
 The default full JSONL export is also mirrored to `data/exports/gemma_multimodal/` for compatibility with older scripts.
+
+NAS create-only output layout:
+
+```text
+<nas_output_root>/exports/
+  runs/export_<timestamp>_<datasets>_<formats>_<id>/
+    assets/pages/<document_id>/page_0001.png
+    assets/crops/handwritten/<document_id>/page_0001/<block_id>.png
+    datasets/<dataset_id>/<format>/train.<ext>
+    datasets/<dataset_id>/<format>/val.<ext>
+    datasets/<dataset_id>/<format>/test.<ext>
+    export_manifest.json
+  completed/<export_run_id>.complete.json
+```
 
 ## `dry-run-artifacts`
 

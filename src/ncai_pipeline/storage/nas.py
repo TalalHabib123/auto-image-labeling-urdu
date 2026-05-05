@@ -4,13 +4,14 @@ import logging
 import os
 import shutil
 import time
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Iterable
 
 from ncai_pipeline.config import NasInputReadinessSettings, NasSettings
-from ncai_pipeline.storage.paths import DataPaths
+from ncai_pipeline.storage.paths import DataPaths, NasDocumentVersionPaths, NasExportVersionPaths
 from ncai_pipeline.storage.repository import FileRepository
 from ncai_pipeline.utils.hashing import sha256_file
 
@@ -30,7 +31,10 @@ NAS_ERROR_CATEGORIES = {
     "input_marker_missing",
     "review_conflict",
     "scratch_cleanup_failed",
+    "nas_permission_insufficient",
 }
+
+CREATE_ONLY_PUBLISH_STRATEGY = "local_scratch_create_only"
 
 
 class NasStorageError(RuntimeError):
@@ -67,8 +71,13 @@ def healthcheck_nas_paths(settings: NasSettings, repository: FileRepository) -> 
         raise NasStorageError(f"NAS output root is not a directory: {output_root}", category="nas_unavailable")
     if not scratch_root.is_dir():
         raise NasStorageError(f"NAS scratch root is not a directory: {scratch_root}", category="nas_unavailable")
+    if settings.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY:
+        if settings.healthcheck.require_writable_output:
+            _assert_create_only_writable(output_root, repository, "output")
+        _assert_writable(scratch_root, repository, "scratch")
+        return
     if settings.healthcheck.require_writable_output:
-        _assert_writable(output_root, repository, "output")
+        _assert_nas_capabilities(output_root, repository, "output")
         _assert_writable(scratch_root, repository, "scratch")
 
 
@@ -241,6 +250,115 @@ def publish_export_artifacts(
                 LOGGER.warning("Could not remove NAS export staging directory %s", staging_dir)
 
 
+def publish_document_artifacts_create_only(
+    *,
+    run_id: str,
+    document_id: str,
+    scratch_paths: DataPaths,
+    final_paths: DataPaths,
+    repository: FileRepository,
+    verify_checksums: bool,
+) -> dict[str, Any]:
+    version_paths = NasDocumentVersionPaths(final_paths.root, document_id, run_id)
+    copy_plan = _document_create_only_copy_plan(document_id, scratch_paths, version_paths)
+    required_paths = [
+        version_paths.manifest_path,
+        version_paths.review_record_path,
+        version_paths.correction_path,
+        version_paths.report_path,
+    ]
+    missing_sources = [str(source) for source, _ in copy_plan if not source.exists()]
+    if missing_sources:
+        raise NasStorageError(
+            f"Could not publish NAS document artifacts for {document_id}: missing source artifact(s): "
+            f"{', '.join(missing_sources)}",
+            category="nas_publish_failed",
+        )
+    existing_targets = [str(target) for _, target in copy_plan if target.exists()]
+    if existing_targets:
+        raise NasStorageError(
+            f"Create-only NAS publish refused to overwrite existing artifact(s): {', '.join(existing_targets)}",
+            category="nas_publish_failed",
+        )
+
+    checksums: dict[str, str] = {}
+    try:
+        for source, target in copy_plan:
+            repository.copy_file_create_only(source, target)
+            relative_path = _relative_to_root(target, final_paths.root)
+            if verify_checksums:
+                expected = sha256_file(source)
+                if sha256_file(target) != expected:
+                    raise NasStorageError(f"Checksum mismatch after create-only publish: {relative_path}", category="nas_publish_failed")
+                checksums[relative_path] = expected
+
+        required_relative = [_relative_to_root(path, final_paths.root) for path in required_paths]
+        completion_payload = document_completion_payload_create_only(
+            document_id=document_id,
+            run_id=run_id,
+            final_paths=final_paths,
+            version_paths=version_paths,
+            required_artifacts=required_relative,
+            checksums_verified=verify_checksums,
+            checksums=checksums,
+        )
+        repository.create_json(version_paths.completion_marker_path, completion_payload)
+        return completion_payload
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, NasStorageError):
+            raise
+        raise NasStorageError(f"Could not publish NAS document artifacts for {document_id}: {exc}", category="nas_publish_failed") from exc
+
+
+def publish_export_artifacts_create_only(
+    *,
+    run_id: str,
+    scratch_paths: DataPaths,
+    final_paths: DataPaths,
+    repository: FileRepository,
+    verify_checksums: bool,
+) -> dict[str, Any]:
+    version_paths = NasExportVersionPaths(final_paths.root, run_id)
+    copy_plan = _export_create_only_copy_plan(scratch_paths, version_paths)
+    manifest_source = scratch_paths.exports_dir / "export_manifest.json"
+    if not manifest_source.exists():
+        raise NasStorageError(f"Export manifest not found in scratch: {manifest_source}", category="nas_publish_failed")
+    existing_targets = [str(target) for _, target in copy_plan if target.exists()]
+    if existing_targets:
+        raise NasStorageError(
+            f"Create-only NAS export refused to overwrite existing artifact(s): {', '.join(existing_targets)}",
+            category="nas_publish_failed",
+        )
+
+    checksums: dict[str, str] = {}
+    try:
+        for source, target in copy_plan:
+            repository.copy_file_create_only(source, target)
+            relative_path = _relative_to_root(target, final_paths.root)
+            if verify_checksums:
+                expected = sha256_file(source)
+                if sha256_file(target) != expected:
+                    raise NasStorageError(f"Checksum mismatch after create-only export publish: {relative_path}", category="nas_publish_failed")
+                checksums[relative_path] = expected
+
+        completion_payload = {
+            "run_id": run_id,
+            "status": "completed",
+            "published_at": _utc_now_iso(),
+            "publish_strategy": CREATE_ONLY_PUBLISH_STRATEGY,
+            "export_manifest_path": str(version_paths.manifest_path),
+            "required_artifacts": [_relative_to_root(version_paths.manifest_path, final_paths.root)],
+            "checksums_verified": verify_checksums,
+            "checksums": checksums,
+        }
+        repository.create_json(version_paths.completion_marker_path, completion_payload)
+        return completion_payload
+    except Exception as exc:  # noqa: BLE001
+        if isinstance(exc, NasStorageError):
+            raise
+        raise NasStorageError(f"Could not publish NAS export artifacts: {exc}", category="nas_publish_failed") from exc
+
+
 def document_completion_payload(
     *,
     document_id: str,
@@ -258,6 +376,35 @@ def document_completion_payload(
         "required_artifacts": required_artifacts,
         "checksums_verified": checksums_verified,
         "completion_marker_path": str(final_paths.completion_markers_dir / f"{document_id}.complete.json"),
+    }
+
+
+def document_completion_payload_create_only(
+    *,
+    document_id: str,
+    run_id: str,
+    final_paths: DataPaths,
+    version_paths: NasDocumentVersionPaths,
+    required_artifacts: list[str],
+    checksums_verified: bool,
+    checksums: dict[str, str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "document_id": document_id,
+        "run_id": run_id,
+        "status": "completed",
+        "published_at": _utc_now_iso(),
+        "artifact_version": 1,
+        "publish_strategy": CREATE_ONLY_PUBLISH_STRATEGY,
+        "manifest_path": str(version_paths.manifest_path),
+        "review_record_path": str(version_paths.review_record_path),
+        "correction_path": str(version_paths.correction_path),
+        "report_path": str(version_paths.report_path),
+        "required_artifacts": required_artifacts,
+        "checksums_verified": checksums_verified,
+        "checksums": checksums or {},
+        "completion_marker_path": str(version_paths.completion_marker_path),
+        "completion_marker_relative_path": _relative_to_root(version_paths.completion_marker_path, final_paths.root),
     }
 
 
@@ -280,6 +427,221 @@ def nas_document_is_complete(
         return False
     required = required_artifacts or marker.get("required_artifacts") or []
     return all((final_paths.root / relative_path).exists() for relative_path in required)
+
+
+def nas_document_is_complete_create_only(
+    final_paths: DataPaths,
+    document_id: str,
+    repository: FileRepository,
+    *,
+    source_sha256: str | None = None,
+) -> bool:
+    marker = NasOutputIndex(final_paths, repository).latest_document_marker(document_id)
+    if marker is None:
+        return False
+    if source_sha256 and marker.manifest.get("source_sha256") not in {None, source_sha256}:
+        return False
+    return True
+
+
+@dataclass(frozen=True)
+class NasDocumentMarker:
+    document_id: str
+    run_id: str
+    marker_path: Path
+    payload: dict[str, Any]
+    manifest_path: Path
+    manifest: dict[str, Any]
+    review_record_path: Path
+    correction_path: Path | None
+    report_path: Path | None
+
+
+class NasOutputIndex:
+    def __init__(self, data_paths: DataPaths, repository: FileRepository) -> None:
+        self.data_paths = data_paths
+        self.repository = repository
+
+    def latest_run_summary(self) -> dict[str, Any] | None:
+        stable_path = self.data_paths.status_dir / "latest_run.json"
+        if stable_path.exists():
+            return self.repository.read_json(stable_path)
+        run_paths = sorted(
+            self.data_paths.run_manifests_dir.glob("*.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for path in run_paths:
+            try:
+                payload = self.repository.read_json(path)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(payload, dict):
+                return payload
+        legacy_paths = sorted(
+            self.data_paths.status_dir.glob("*/run_manifest.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for path in legacy_paths:
+            try:
+                payload = self.repository.read_json(path)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(payload, dict):
+                return payload
+        return None
+
+    def latest_export_summary(self) -> dict[str, Any] | None:
+        stable_path = self.data_paths.exports_dir / "export_manifest.json"
+        if stable_path.exists():
+            return self.repository.read_json(stable_path)
+        legacy_path = self.data_paths.export_target_dir / "export_manifest.json"
+        if legacy_path.exists():
+            return self.repository.read_json(legacy_path)
+        marker = self.latest_export_marker()
+        if marker is None:
+            return None
+        manifest_path = Path(str(marker.get("export_manifest_path") or ""))
+        if not manifest_path.exists():
+            return None
+        payload = self.repository.read_json(manifest_path)
+        return payload if isinstance(payload, dict) else None
+
+    def latest_export_marker(self) -> dict[str, Any] | None:
+        marker_paths = sorted(
+            (self.data_paths.exports_dir / "completed").glob("*.complete.json"),
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for marker_path in marker_paths:
+            try:
+                marker = self.repository.read_json(marker_path)
+            except Exception:  # noqa: BLE001
+                continue
+            if not isinstance(marker, dict) or marker.get("status") != "completed":
+                continue
+            manifest_path = Path(str(marker.get("export_manifest_path") or ""))
+            if manifest_path.exists():
+                return marker
+        return None
+
+    def latest_document_marker(self, document_id: str) -> NasDocumentMarker | None:
+        markers = self.document_markers(document_id)
+        return markers[0] if markers else None
+
+    def document_markers(self, document_id: str) -> list[NasDocumentMarker]:
+        marker_dir = self.data_paths.completion_markers_dir / document_id
+        marker_paths = list(marker_dir.glob("*.complete.json")) if marker_dir.exists() else []
+        legacy_marker = self.data_paths.completion_markers_dir / f"{document_id}.complete.json"
+        if legacy_marker.exists():
+            marker_paths.append(legacy_marker)
+        markers: list[NasDocumentMarker] = []
+        for marker_path in marker_paths:
+            marker = self._load_document_marker(marker_path, document_id)
+            if marker is not None:
+                markers.append(marker)
+        return sorted(markers, key=lambda item: _marker_sort_key(item.payload, item.marker_path), reverse=True)
+
+    def latest_document_markers(self) -> list[NasDocumentMarker]:
+        by_document: dict[str, NasDocumentMarker] = {}
+        candidate_paths = list(self.data_paths.completion_markers_dir.glob("*/*.complete.json"))
+        candidate_paths.extend(self.data_paths.completion_markers_dir.glob("*.complete.json"))
+        for marker_path in candidate_paths:
+            marker = self._load_document_marker(marker_path, None)
+            if marker is None:
+                continue
+            current = by_document.get(marker.document_id)
+            if current is None or _marker_sort_key(marker.payload, marker.marker_path) > _marker_sort_key(current.payload, current.marker_path):
+                by_document[marker.document_id] = marker
+        return sorted(by_document.values(), key=lambda item: item.document_id)
+
+    def latest_manifest(self, document_id: str) -> dict[str, Any] | None:
+        marker = self.latest_document_marker(document_id)
+        return marker.manifest if marker is not None else None
+
+    def latest_review_record_path(self, document_id: str) -> Path | None:
+        revision_marker = self.latest_review_revision_marker(document_id)
+        if revision_marker is not None:
+            path = Path(str(revision_marker.get("review_record_path") or ""))
+            if path.exists():
+                return path
+        marker = self.latest_document_marker(document_id)
+        return marker.review_record_path if marker is not None and marker.review_record_path.exists() else None
+
+    def latest_review_record_paths(self) -> list[Path]:
+        paths: list[Path] = []
+        for marker in self.latest_document_markers():
+            path = self.latest_review_record_path(marker.document_id)
+            if path is not None:
+                paths.append(path)
+        return sorted(paths)
+
+    def latest_review_revision_marker(self, document_id: str) -> dict[str, Any] | None:
+        marker_dir = self.data_paths.status_dir / "review_revisions" / document_id
+        marker_paths = sorted(
+            marker_dir.glob("*.complete.json") if marker_dir.exists() else [],
+            key=lambda item: item.stat().st_mtime,
+            reverse=True,
+        )
+        for marker_path in marker_paths:
+            try:
+                marker = self.repository.read_json(marker_path)
+            except Exception:  # noqa: BLE001
+                continue
+            if isinstance(marker, dict) and marker.get("status") == "completed":
+                return marker
+        return None
+
+    def latest_page_image_path(self, document_id: str, page_number: int) -> Path:
+        marker = self.latest_document_marker(document_id)
+        if marker is not None:
+            run_path = self.data_paths.rendered_pages_dir / document_id / marker.run_id / f"page_{page_number:04d}.png"
+            if run_path.exists():
+                return run_path
+        return self.data_paths.rendered_pages_dir / document_id / f"page_{page_number:04d}.png"
+
+    def _load_document_marker(self, marker_path: Path, expected_document_id: str | None) -> NasDocumentMarker | None:
+        try:
+            payload = self.repository.read_json(marker_path)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(payload, dict) or payload.get("status") != "completed":
+            return None
+        document_id = str(payload.get("document_id") or expected_document_id or "")
+        run_id = str(payload.get("run_id") or marker_path.stem.replace(".complete", ""))
+        if not document_id:
+            return None
+        if expected_document_id is not None and document_id != expected_document_id:
+            return None
+        manifest_path = Path(str(payload.get("manifest_path") or self.data_paths.manifests_dir / document_id / "manifest.json"))
+        if not manifest_path.exists():
+            return None
+        try:
+            manifest = self.repository.read_json(manifest_path)
+        except Exception:  # noqa: BLE001
+            return None
+        if not isinstance(manifest, dict):
+            return None
+        required = payload.get("required_artifacts") or []
+        if not _required_artifacts_exist(self.data_paths.root, required):
+            return None
+        review_record_path = Path(str(payload.get("review_record_path") or self.data_paths.status_dir / document_id / "review_record.json"))
+        if not review_record_path.exists():
+            return None
+        correction_path = Path(str(payload["correction_path"])) if payload.get("correction_path") else None
+        report_path = Path(str(payload["report_path"])) if payload.get("report_path") else None
+        return NasDocumentMarker(
+            document_id=document_id,
+            run_id=run_id,
+            marker_path=marker_path,
+            payload=payload,
+            manifest_path=manifest_path,
+            manifest=manifest,
+            review_record_path=review_record_path,
+            correction_path=correction_path,
+            report_path=report_path,
+        )
 
 
 def cleanup_successful_scratch(scratch_root: Path, run_id: str, settings: NasSettings, repository: FileRepository) -> None:
@@ -309,11 +671,105 @@ def retain_failed_scratch(scratch_root: Path, run_id: str, repository: FileRepos
     failed_run.parent.mkdir(parents=True, exist_ok=True)
     shutil.move(str(active_run), str(failed_run))
 
+def _assert_nas_capabilities(root: Path, repository: FileRepository, label: str) -> None:
+    healthcheck_dir = root / ".nas_pipeline_healthcheck"
+    pid = os.getpid()
+
+    raw_probe = healthcheck_dir / f"raw_write_probe_{pid}.txt"
+    rename_src = healthcheck_dir / f"rename_probe_{pid}.tmp"
+    rename_dst = healthcheck_dir / f"rename_probe_{pid}.txt"
+    delete_probe = healthcheck_dir / f"delete_probe_{pid}.txt"
+
+    try:
+        healthcheck_dir.mkdir(parents=True, exist_ok=True)
+
+        # 1. Basic write/read
+        raw_probe.write_text(_utc_now_iso(), encoding="utf-8")
+        _ = raw_probe.read_text(encoding="utf-8")
+
+        # 2. Rename/replace capability
+        rename_src.write_text(_utc_now_iso(), encoding="utf-8")
+        try:
+            os.replace(rename_src, rename_dst)
+        except PermissionError as exc:
+            raise NasStorageError(
+                f"NAS {label} root allows basic write but denies atomic rename/replace. "
+                f"Your pipeline uses atomic writes, so this NAS user needs Modify/Delete/Rename permission. "
+                f"root={root}",
+                category="nas_permission_insufficient",
+            ) from exc
+
+        # 3. Delete capability
+        delete_probe.write_text(_utc_now_iso(), encoding="utf-8")
+        try:
+            delete_probe.unlink()
+        except PermissionError as exc:
+            raise NasStorageError(
+                f"NAS {label} root allows write but denies delete. "
+                f"Pipeline cleanup, lock cleanup, and atomic writes may fail. "
+                f"root={root}",
+                category="nas_permission_insufficient",
+            ) from exc
+
+    except OSError as exc:
+        raise NasStorageError(
+            f"NAS {label} root failed storage capability check: {root}: {exc}",
+            category="nas_unavailable",
+        ) from exc
+
+    finally:
+        # Best-effort cleanup only. Never rely on this succeeding with restricted NAS permissions.
+        for p in [raw_probe, rename_src, rename_dst, delete_probe]:
+            try:
+                p.unlink(missing_ok=True)
+            except OSError:
+                pass
+
+        try:
+            healthcheck_dir.rmdir()
+        except OSError:
+            pass
+
+
+def _assert_create_only_writable(root: Path, repository: FileRepository, label: str) -> None:
+    healthcheck_dir = root / ".nas_pipeline_healthcheck" / f"create_only_{os.getpid()}_{uuid.uuid4().hex}"
+    probe = healthcheck_dir / "write_probe.json"
+    try:
+        healthcheck_dir.mkdir(parents=True, exist_ok=False)
+        repository.create_json(
+            probe,
+            {
+                "created_at": _utc_now_iso(),
+                "purpose": "create-only NAS output healthcheck",
+                "label": label,
+            },
+        )
+        payload = repository.read_json(probe)
+        if not isinstance(payload, dict) or payload.get("purpose") != "create-only NAS output healthcheck":
+            raise NasStorageError(f"NAS {label} root create-only healthcheck readback mismatch: {root}", category="nas_write_failed")
+    except NasStorageError:
+        raise
+    except OSError as exc:
+        raise NasStorageError(
+            f"NAS {label} root does not allow create/read output required for create-only mode: {root}: {exc}",
+            category="nas_unavailable",
+        ) from exc
+    finally:
+        # Best effort only: limited NAS accounts may not be allowed to delete healthcheck files.
+        try:
+            probe.unlink(missing_ok=True)
+        except OSError:
+            pass
+        try:
+            healthcheck_dir.rmdir()
+        except OSError:
+            pass
+
 
 def _assert_writable(root: Path, repository: FileRepository, label: str) -> None:
     probe = root / ".nas_pipeline_healthcheck" / f"write_probe_{os.getpid()}.txt"
     try:
-        repository.write_text(probe, _utc_now_iso())
+        repository.write_text(probe, _utc_now_iso(), atomic=True)
         _ = repository.read_text(probe)
         probe.unlink(missing_ok=True)
         if probe.parent.exists():
@@ -323,6 +779,70 @@ def _assert_writable(root: Path, repository: FileRepository, label: str) -> None
                 pass
     except OSError as exc:
         raise NasStorageError(f"NAS {label} root is not writable: {root}: {exc}", category="nas_unavailable") from exc
+
+
+def _document_create_only_copy_plan(
+    document_id: str,
+    scratch_paths: DataPaths,
+    version_paths: NasDocumentVersionPaths,
+) -> list[tuple[Path, Path]]:
+    pairs: list[tuple[Path, Path]] = []
+    pairs.extend(_tree_file_pairs(scratch_paths.rendered_pages_dir / document_id, version_paths.rendered_pages_dir))
+    pairs.extend(_tree_file_pairs(scratch_paths.raw_requests_dir / document_id, version_paths.raw_requests_dir))
+    pairs.extend(_tree_file_pairs(scratch_paths.raw_responses_dir / document_id, version_paths.raw_responses_dir))
+    pairs.extend(_tree_file_pairs(scratch_paths.parsed_dir / document_id, version_paths.parsed_dir))
+    pairs.append((scratch_paths.status_dir / document_id / "review_record.json", version_paths.review_record_path))
+    pairs.append((scratch_paths.correction_files_dir / document_id / "corrected.yaml", version_paths.correction_path))
+    pairs.append((scratch_paths.reports_dir / document_id / "report.html", version_paths.report_path))
+    pairs.append((scratch_paths.manifests_dir / document_id / "manifest.json", version_paths.manifest_path))
+    return pairs
+
+
+def _export_create_only_copy_plan(
+    scratch_paths: DataPaths,
+    version_paths: NasExportVersionPaths,
+) -> list[tuple[Path, Path]]:
+    pairs: list[tuple[Path, Path]] = []
+    pairs.extend(_tree_file_pairs(scratch_paths.exports_dir, version_paths.export_root))
+    return pairs
+
+
+def _tree_file_pairs(source_dir: Path, target_dir: Path) -> list[tuple[Path, Path]]:
+    if not source_dir.exists():
+        return []
+    if source_dir.is_file():
+        return [(source_dir, target_dir)]
+    return [
+        (source, target_dir / source.relative_to(source_dir))
+        for source in sorted(source_dir.rglob("*"))
+        if source.is_file()
+    ]
+
+
+def _relative_to_root(path: Path, root: Path) -> str:
+    try:
+        return path.relative_to(root).as_posix()
+    except ValueError:
+        return str(path)
+
+
+def _required_artifacts_exist(root: Path, required_artifacts: Any) -> bool:
+    if not isinstance(required_artifacts, list):
+        return False
+    for item in required_artifacts:
+        if not isinstance(item, str) or not item:
+            return False
+        candidate = Path(item)
+        path = candidate if candidate.is_absolute() else root / candidate
+        if not path.exists():
+            return False
+    return True
+
+
+def _marker_sort_key(payload: dict[str, Any], marker_path: Path) -> tuple[str, float]:
+    published_at = payload.get("published_at")
+    timestamp = published_at if isinstance(published_at, str) else ""
+    return (timestamp, marker_path.stat().st_mtime)
 
 
 def _copy_document_artifacts_to_staging(document_id: str, scratch_paths: DataPaths, staging_dir: Path, repository: FileRepository) -> None:

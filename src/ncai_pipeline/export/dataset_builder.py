@@ -19,6 +19,7 @@ from ncai_pipeline.schemas.export import CuratedTrainingSample, ExportManifest, 
 from ncai_pipeline.schemas.extraction import ExtractedBlock
 from ncai_pipeline.schemas.review import CorrectedDocument, ReviewRecord
 from ncai_pipeline.storage.paths import DataPaths
+from ncai_pipeline.storage.nas import CREATE_ONLY_PUBLISH_STRATEGY, NasOutputIndex
 from ncai_pipeline.storage.repository import FileRepository
 from ncai_pipeline.utils.time import utc_now_iso
 
@@ -50,7 +51,14 @@ class DatasetBuilder:
 
     def load_review_records(self) -> list[ReviewRecord]:
         records: list[ReviewRecord] = []
-        for path in sorted(self.source_data_paths.status_dir.glob("*/review_record.json")):
+        if (
+            self.config.pipeline.storage_mode == "nas"
+            and self.config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY
+        ):
+            paths = NasOutputIndex(self.source_data_paths, self.repository).latest_review_record_paths()
+        else:
+            paths = sorted(self.source_data_paths.status_dir.glob("*/review_record.json"))
+        for path in paths:
             records.append(ReviewRecord.model_validate(self.repository.read_json(path)))
         return records
 
@@ -96,6 +104,10 @@ class DatasetBuilder:
         )
         dataset_ids = normalize_dataset_ids(dataset_types or self.config.export.dataset_types, region_source or self.config.export.region_source)
         datasets = {dataset_id: [] for dataset_id in dataset_ids}
+        include_page_assets = any(
+            dataset_id in {"full", "page_text", "regions_blocks", "regions_sections"}
+            for dataset_id in dataset_ids
+        )
 
         for document in documents:
             for dataset_id in dataset_ids:
@@ -108,7 +120,9 @@ class DatasetBuilder:
                 elif dataset_id == "regions_sections":
                     datasets[dataset_id].extend(self._build_region_section_samples(document))
                 elif dataset_id == "handwritten":
-                    datasets[dataset_id].extend(self._build_handwritten_samples(document))
+                    datasets[dataset_id].extend(
+                        self._build_handwritten_samples(document, include_page_image=include_page_assets)
+                    )
                 else:
                     raise ValueError(f"Unsupported dataset type: {dataset_id}")
 
@@ -219,7 +233,7 @@ class DatasetBuilder:
     def _build_full_sample(self, document: ApprovedDocument) -> CuratedTrainingSample:
         corrected = document.corrected
         input_media_paths = [
-            str(self._page_asset_path(corrected.document_id, page.page_number or index))
+            self._portable_export_path(self._page_asset_path(corrected.document_id, page.page_number or index))
             for index, page in enumerate(corrected.extracted_pages, start=1)
         ]
         sample = CuratedTrainingSample(
@@ -250,7 +264,7 @@ class DatasetBuilder:
                     "dataset_type": "page_text",
                     "document_id": document.record.document_id,
                     "page_number": page_number,
-                    "image_path": str(self._page_asset_path(document.record.document_id, page_number)),
+                    "image_path": self._portable_export_path(self._page_asset_path(document.record.document_id, page_number)),
                     "full_text": page.full_text,
                     "language": page.language or "ur",
                     "source_split": document.split,
@@ -270,7 +284,7 @@ class DatasetBuilder:
                     "dataset_type": "regions_blocks",
                     "document_id": document.record.document_id,
                     "page_number": page_number,
-                    "image_path": str(self._page_asset_path(document.record.document_id, page_number)),
+                    "image_path": self._portable_export_path(self._page_asset_path(document.record.document_id, page_number)),
                     "target_output": {"blocks": blocks},
                     "blocks": blocks,
                     "language": page.language or "ur",
@@ -291,7 +305,7 @@ class DatasetBuilder:
                     "dataset_type": "regions_sections",
                     "document_id": document.record.document_id,
                     "page_number": page_number,
-                    "image_path": str(self._page_asset_path(document.record.document_id, page_number)),
+                    "image_path": self._portable_export_path(self._page_asset_path(document.record.document_id, page_number)),
                     "target_output": {"sections": sections},
                     "sections": sections,
                     "language": page.language or "ur",
@@ -301,11 +315,15 @@ class DatasetBuilder:
             )
         return samples
 
-    def _build_handwritten_samples(self, document: ApprovedDocument) -> list[dict[str, Any]]:
+    def _build_handwritten_samples(self, document: ApprovedDocument, *, include_page_image: bool) -> list[dict[str, Any]]:
         samples: list[dict[str, Any]] = []
         for index, page in enumerate(document.corrected.extracted_pages, start=1):
             page_number = page.page_number or index
-            source_page_path = self._page_asset_path(document.record.document_id, page_number)
+            source_page_path = (
+                self._page_asset_path(document.record.document_id, page_number)
+                if include_page_image
+                else None
+            )
             for block in page.blocks:
                 handwriting = self._block_handwriting_status(block)
                 if not handwriting["handwritten_effective"]:
@@ -320,26 +338,26 @@ class DatasetBuilder:
                 if crop_path is None:
                     self._skipped_counts["handwritten_crop_failed"] += 1
                     continue
-                samples.append(
-                    {
-                        "sample_id": f"{document.record.document_id}_page_{page_number:04d}_{_safe_name(block.block_id)}_{document.split}",
-                        "dataset_type": "handwritten",
-                        "document_id": document.record.document_id,
-                        "page_number": page_number,
-                        "block_id": block.block_id,
-                        "crop_path": str(crop_path),
-                        "image_path": str(source_page_path),
-                        "text": block.text,
-                        "bbox": _bbox_payload(block.bbox),
-                        "handwritten_auto": handwriting["handwritten_auto"],
-                        "handwritten_manual": handwriting["handwritten_manual"],
-                        "handwritten_effective": handwriting["handwritten_effective"],
-                        "handwritten_source": handwriting["handwritten_source"],
-                        "language": page.language or "ur",
-                        "source_split": document.split,
-                        "approval_metadata": document.corrected.approval_metadata.model_dump(mode="json"),
-                    }
-                )
+                sample = {
+                    "sample_id": f"{document.record.document_id}_page_{page_number:04d}_{_safe_name(block.block_id)}_{document.split}",
+                    "dataset_type": "handwritten",
+                    "document_id": document.record.document_id,
+                    "page_number": page_number,
+                    "block_id": block.block_id,
+                    "image_path": self._portable_export_path(crop_path),
+                    "text": block.text,
+                    "bbox": _bbox_payload(block.bbox),
+                    "handwritten_auto": handwriting["handwritten_auto"],
+                    "handwritten_manual": handwriting["handwritten_manual"],
+                    "handwritten_effective": handwriting["handwritten_effective"],
+                    "handwritten_source": handwriting["handwritten_source"],
+                    "language": page.language or "ur",
+                    "source_split": document.split,
+                    "approval_metadata": document.corrected.approval_metadata.model_dump(mode="json"),
+                }
+                if source_page_path is not None:
+                    sample["page_path"] = self._portable_export_path(source_page_path)
+                samples.append(sample)
         return samples
 
     def _block_payload(self, block: ExtractedBlock) -> dict[str, Any]:
@@ -363,7 +381,7 @@ class DatasetBuilder:
         )
 
     def _page_asset_path(self, document_id: str, page_number: int) -> Path:
-        source = self.source_data_paths.rendered_pages_dir / document_id / f"page_{page_number:04d}.png"
+        source = self._source_page_path(document_id, page_number)
         if self.config.export.assets.page_strategy == "reference_working":
             return source
         target = self.data_paths.export_page_assets_dir / document_id / f"page_{page_number:04d}.png"
@@ -386,7 +404,7 @@ class DatasetBuilder:
     ) -> Path | None:
         if not self._has_bbox(bbox):
             return None
-        source = self.source_data_paths.rendered_pages_dir / document_id / f"page_{page_number:04d}.png"
+        source = self._source_page_path(document_id, page_number)
         if not source.exists():
             return None
         target = (
@@ -409,6 +427,22 @@ class DatasetBuilder:
             self._asset_counts["handwritten_crops"] += 1
             self._counted_crop_assets.add(target)
         return target
+
+    def _portable_export_path(self, path: Path) -> str:
+        for root in (self.data_paths.exports_dir, self.source_data_paths.root, self.data_paths.root):
+            try:
+                return path.relative_to(root).as_posix()
+            except ValueError:
+                continue
+        return path.as_posix()
+
+    def _source_page_path(self, document_id: str, page_number: int) -> Path:
+        if (
+            self.config.pipeline.storage_mode == "nas"
+            and self.config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY
+        ):
+            return NasOutputIndex(self.source_data_paths, self.repository).latest_page_image_path(document_id, page_number)
+        return self.source_data_paths.rendered_pages_dir / document_id / f"page_{page_number:04d}.png"
 
     def _clamped_crop_box(self, bbox: BoundingBox | None, width: int, height: int) -> tuple[int, int, int, int]:
         assert bbox is not None

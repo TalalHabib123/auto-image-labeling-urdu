@@ -139,3 +139,64 @@ class DataPaths:
 
     def document_dir(self, base: Path, document_id: str) -> Path:
         return base / document_id
+
+
+@dataclass(frozen=True)
+class NasDocumentVersionPaths:
+    root: Path
+    document_id: str
+    run_id: str
+
+    @property
+    def rendered_pages_dir(self) -> Path:
+        return self.root / "working" / "rendered_pages" / self.document_id / self.run_id
+
+    @property
+    def raw_requests_dir(self) -> Path:
+        return self.root / "working" / "raw_requests" / self.document_id / self.run_id
+
+    @property
+    def raw_responses_dir(self) -> Path:
+        return self.root / "working" / "raw_responses" / self.document_id / self.run_id
+
+    @property
+    def parsed_dir(self) -> Path:
+        return self.root / "working" / "parsed" / self.document_id / self.run_id
+
+    @property
+    def manifest_path(self) -> Path:
+        return self.root / "working" / "manifests" / self.document_id / f"{self.run_id}.manifest.json"
+
+    @property
+    def review_record_path(self) -> Path:
+        return self.root / "working" / "status" / "review_records" / self.document_id / f"{self.run_id}.review_record.json"
+
+    @property
+    def correction_path(self) -> Path:
+        return self.root / "review" / "correction_files" / self.document_id / f"{self.run_id}.corrected.yaml"
+
+    @property
+    def report_path(self) -> Path:
+        return self.root / "review" / "reports" / self.document_id / f"{self.run_id}.report.html"
+
+    @property
+    def completion_marker_path(self) -> Path:
+        return self.root / "working" / "status" / "documents" / self.document_id / f"{self.run_id}.complete.json"
+
+
+@dataclass(frozen=True)
+class NasExportVersionPaths:
+    root: Path
+    run_id: str
+
+    @property
+    def export_root(self) -> Path:
+        return self.root / "exports" / "runs" / self.run_id
+
+    @property
+    def manifest_path(self) -> Path:
+        return self.export_root / "export_manifest.json"
+
+    @property
+    def completion_marker_path(self) -> Path:
+        return self.root / "exports" / "completed" / f"{self.run_id}.complete.json"

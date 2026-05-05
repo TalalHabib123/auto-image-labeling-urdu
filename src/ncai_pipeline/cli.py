@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import re
 from collections import Counter
+from datetime import datetime, timezone
+from pathlib import Path
 from typing import Annotated, Any, Callable
 
 import typer
@@ -21,9 +24,12 @@ from ncai_pipeline.schemas.common import ReviewStatus
 from ncai_pipeline.schemas.review import ReviewRecord
 from ncai_pipeline.storage.locks import export_lock
 from ncai_pipeline.storage.nas import (
+    CREATE_ONLY_PUBLISH_STRATEGY,
+    NasOutputIndex,
     cleanup_successful_scratch,
     healthcheck_nas_paths,
     publish_export_artifacts,
+    publish_export_artifacts_create_only,
     retain_failed_scratch,
 )
 from ncai_pipeline.storage.paths import DataPaths
@@ -40,13 +46,20 @@ def _load_runtime(config_path: str | None = None) -> tuple[AppConfig, DataPaths,
     data_paths = runtime.final_paths
     repository = FileRepository()
     if runtime.is_nas:
+        create_only_publish = config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY
         data_paths.status_dir.mkdir(parents=True, exist_ok=True)
-        data_paths.locks_dir.mkdir(parents=True, exist_ok=True)
+        if not create_only_publish:
+            data_paths.locks_dir.mkdir(parents=True, exist_ok=True)
         data_paths.run_manifests_dir.mkdir(parents=True, exist_ok=True)
         data_paths.completion_markers_dir.mkdir(parents=True, exist_ok=True)
     else:
         data_paths.ensure()
-    configure_logging(config.logging.level, data_paths.status_dir / "pipeline.log")
+    if runtime.is_nas and config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY:
+        assert runtime.scratch_root is not None
+        log_file = runtime.scratch_root / "pipeline.log"
+    else:
+        log_file = data_paths.status_dir / "pipeline.log"
+    configure_logging(config.logging.level, log_file)
     return config, data_paths, repository
 
 
@@ -58,6 +71,7 @@ def _build_review_service(config: AppConfig, data_paths: DataPaths, repository: 
         storage_mode=config.pipeline.storage_mode,
         locks_enabled=config.nas.locks.enabled,
         lock_stale_after_minutes=config.nas.locks.stale_after_minutes,
+        publish_strategy=config.nas.publish_strategy,
     )
 
 
@@ -75,9 +89,18 @@ def _write_exports(
     final_paths = data_paths
     write_paths = data_paths
     run_id: str | None = None
+    create_only_publish = runtime.is_nas and config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY
+    requested_dataset_types = dataset_types or config.export.dataset_types
+    requested_formats = _normalize_output_formats(output_formats or config.export.output_formats)
+    requested_region_source = region_source or config.export.region_source
+    dataset_ids = normalize_dataset_ids(requested_dataset_types, requested_region_source)
     if runtime.is_nas:
         healthcheck_nas_paths(config.nas, repository)
-        run_id = create_run_context().run_id
+        run_id = (
+            _create_export_run_id(dataset_ids, requested_formats)
+            if create_only_publish
+            else create_run_context().run_id
+        )
         runtime = runtime.for_run(run_id)
         assert runtime.scratch_paths is not None
         assert runtime.scratch_root is not None
@@ -90,16 +113,13 @@ def _write_exports(
         repository,
         source_data_paths=final_paths if runtime.is_nas else None,
     )
-    requested_dataset_types = dataset_types or config.export.dataset_types
-    requested_formats = _normalize_output_formats(output_formats or config.export.output_formats)
-    requested_region_source = region_source or config.export.region_source
     try:
         lock_context = export_lock(
             final_paths.locks_dir,
             repository,
             run_id=run_id,
             stale_after_minutes=config.nas.locks.stale_after_minutes,
-            enabled=runtime.is_nas and config.nas.locks.enabled,
+            enabled=runtime.is_nas and config.nas.locks.enabled and not create_only_publish,
         )
         with lock_context:
             datasets, manifest = builder.build_datasets(
@@ -108,7 +128,6 @@ def _write_exports(
                 include_dry_run=include_dry_run,
                 progress_callback=progress_callback,
             )
-            dataset_ids = normalize_dataset_ids(requested_dataset_types, requested_region_source)
             files: dict[str, Any] = {}
             split_names = ["train", "val", "test"]
             extension_map = {"jsonl": "jsonl", "json": "json", "csv": "csv", "xlsx": "xlsx"}
@@ -123,16 +142,17 @@ def _write_exports(
                         split_records = [record for record in records if record.get("source_split") == split_name]
                         file_path = format_dir / f"{split_name}.{extension_map[output_format]}"
                         write_records(file_path, split_records, output_format) # type: ignore
-                        format_files[split_name] = str(file_path)
+                        format_files[split_name] = _export_file_ref(file_path, write_paths.exports_dir)
                     files[dataset_id][output_format] = format_files
-                    format_manifest = manifest.model_copy(deep=True)
-                    format_manifest.dataset_id = dataset_id
-                    format_manifest.output_format = output_format
-                    format_manifest.dataset_types = [dataset_id]
-                    format_manifest.output_formats = [output_format]
-                    format_manifest.samples = len(records)
-                    format_manifest.files = format_files # type: ignore
-                    repository.write_json(format_dir / "export_manifest.json", format_manifest)
+                    if not create_only_publish:
+                        format_manifest = manifest.model_copy(deep=True)
+                        format_manifest.dataset_id = dataset_id
+                        format_manifest.output_format = output_format
+                        format_manifest.dataset_types = [dataset_id]
+                        format_manifest.output_formats = [output_format]
+                        format_manifest.samples = len(records)
+                        format_manifest.files = format_files # type: ignore
+                        repository.write_json(format_dir / "export_manifest.json", format_manifest)
 
             manifest.dataset_types = dataset_ids
             manifest.output_formats = requested_formats
@@ -143,18 +163,27 @@ def _write_exports(
             }
             repository.write_json(write_paths.exports_dir / "export_manifest.json", manifest)
 
-            if "full" in datasets and "jsonl" in requested_formats:
+            if "full" in datasets and "jsonl" in requested_formats and not create_only_publish:
                 _write_legacy_full_jsonl_aliases(write_paths, repository, datasets["full"], manifest)
 
             if runtime.is_nas:
                 assert run_id is not None
-                publish_export_artifacts(
-                    run_id=run_id,
-                    scratch_paths=write_paths,
-                    final_paths=final_paths,
-                    repository=repository,
-                    verify_checksums=config.nas.checksums.verify_after_publish,
-                )
+                if create_only_publish:
+                    publish_export_artifacts_create_only(
+                        run_id=run_id,
+                        scratch_paths=write_paths,
+                        final_paths=final_paths,
+                        repository=repository,
+                        verify_checksums=config.nas.checksums.verify_after_publish,
+                    )
+                else:
+                    publish_export_artifacts(
+                        run_id=run_id,
+                        scratch_paths=write_paths,
+                        final_paths=final_paths,
+                        repository=repository,
+                        verify_checksums=config.nas.checksums.verify_after_publish,
+                    )
     except Exception:
         if runtime.is_nas:
             assert run_id is not None
@@ -183,6 +212,28 @@ def _normalize_output_formats(output_formats: list[str]) -> list[str]:
     return normalized
 
 
+def _create_export_run_id(dataset_ids: list[str], output_formats: list[str]) -> str:
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%d_%H%M%S")
+    dataset_part = _safe_run_id_part("-".join(dataset_ids), fallback="datasets", max_length=56)
+    format_part = _safe_run_id_part("-".join(output_formats), fallback="formats", max_length=32)
+    suffix = create_run_context().run_id.removeprefix("run_")[:8]
+    return f"export_{timestamp}_{dataset_part}_{format_part}_{suffix}"
+
+
+def _safe_run_id_part(value: str, *, fallback: str, max_length: int) -> str:
+    normalized = re.sub(r"[^a-z0-9_.-]+", "-", value.strip().lower()).strip("-_.")
+    if not normalized:
+        normalized = fallback
+    return normalized[:max_length].strip("-_.") or fallback
+
+
+def _export_file_ref(file_path: Path, exports_dir: Path) -> str:
+    try:
+        return file_path.relative_to(exports_dir).as_posix()
+    except ValueError:
+        return file_path.as_posix()
+
+
 def _write_legacy_full_jsonl_aliases(
     data_paths: DataPaths,
     repository: FileRepository,
@@ -194,7 +245,7 @@ def _write_legacy_full_jsonl_aliases(
         split_records = [record for record in records if record.get("source_split") == split_name]
         file_path = data_paths.export_target_dir / f"{split_name}.jsonl"
         write_records(file_path, split_records, "jsonl") # type: ignore
-        files[split_name] = str(file_path)
+        files[split_name] = _export_file_ref(file_path, data_paths.exports_dir)
     legacy_manifest = manifest.model_copy(deep=True) if hasattr(manifest, "model_copy") else manifest # pyright: ignore[reportAttributeAccessIssue]
     legacy_manifest.files = files # pyright: ignore[reportAttributeAccessIssue]
     legacy_manifest.dataset_types = ["full"] # pyright: ignore[reportAttributeAccessIssue]
@@ -253,8 +304,14 @@ def _emit_run_summary(summary: dict[str, Any], data_paths: DataPaths) -> None:
     for entry in failed_docs:
         typer.echo(f"- {_format_document_entry(entry)}")
 
-    typer.echo(f"Latest run status: {data_paths.status_dir / 'latest_run.json'}")
-    typer.echo(f"Run manifest: {data_paths.status_dir / summary['run_id'] / 'run_manifest.json'}")
+    nas_metadata = summary.get("nas") if isinstance(summary.get("nas"), dict) else {}
+    run_id = str(summary["run_id"])
+    if summary.get("storage_mode") == "nas" and nas_metadata.get("publish_strategy") == CREATE_ONLY_PUBLISH_STRATEGY:
+        typer.echo(f"Latest run status: derived from {data_paths.run_manifests_dir}")
+        typer.echo(f"Run manifest: {data_paths.run_manifests_dir / f'{run_id}.json'}")
+    else:
+        typer.echo(f"Latest run status: {data_paths.status_dir / 'latest_run.json'}")
+        typer.echo(f"Run manifest: {data_paths.status_dir / run_id / 'run_manifest.json'}")
 
 
 def _emit_run_progress(update: dict[str, Any]) -> None:
@@ -324,9 +381,13 @@ def run(
 def review_status(
     config_path: Annotated[str | None, typer.Option("--config")] = None,
 ) -> None:
-    _, data_paths, repository = _load_runtime(config_path)
+    config, data_paths, repository = _load_runtime(config_path)
     counter: Counter[str] = Counter()
-    for path in sorted(data_paths.status_dir.glob("*/review_record.json")):
+    if config.pipeline.storage_mode == "nas" and config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY:
+        paths = NasOutputIndex(data_paths, repository).latest_review_record_paths()
+    else:
+        paths = sorted(data_paths.status_dir.glob("*/review_record.json"))
+    for path in paths:
         record = ReviewRecord.model_validate(repository.read_json(path))
         counter[record.review_status.value] += 1
     typer.echo(f"Review status counts: {dict(counter)}")
@@ -362,11 +423,14 @@ def pipeline_status(
     status: Annotated[str, typer.Option("--status", help="all or a specific pipeline status")] = "all",
     config_path: Annotated[str | None, typer.Option("--config")] = None,
 ) -> None:
-    _, data_paths, repository = _load_runtime(config_path)
+    config, data_paths, repository = _load_runtime(config_path)
     manifests = []
     counts: Counter[str] = Counter()
-    for path in sorted(data_paths.manifests_dir.glob("*/manifest.json")):
-        manifest = repository.read_json(path)
+    if config.pipeline.storage_mode == "nas" and config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY:
+        manifest_payloads = [marker.manifest for marker in NasOutputIndex(data_paths, repository).latest_document_markers()]
+    else:
+        manifest_payloads = [repository.read_json(path) for path in sorted(data_paths.manifests_dir.glob("*/manifest.json"))]
+    for manifest in manifest_payloads:
         counts[manifest["status"]] += 1
         manifests.append(manifest)
 
@@ -394,6 +458,21 @@ def approve(
     config_path: Annotated[str | None, typer.Option("--config")] = None,
 ) -> None:
     config, data_paths, repository = _load_runtime(config_path)
+    if config.pipeline.storage_mode == "nas" and config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY:
+        service = _build_review_service(config, data_paths, repository)
+        try:
+            service.set_document_review_status(
+                document_id,
+                status=status,
+                reviewer=reviewer,
+                comments=comments,
+                require_verified_pages=False,
+                auto_verify_pages_on_approve=(status == ReviewStatus.APPROVED),
+            )
+        except (FileNotFoundError, ValueError) as exc:
+            raise typer.BadParameter(str(exc)) from exc
+        typer.echo(f"Updated {document_id} to {status.value}")
+        return
     correction_path = data_paths.correction_files_dir / document_id / "corrected.yaml"
     if not correction_path.exists():
         raise typer.BadParameter(f"Correction file not found for document: {document_id}")
@@ -432,6 +511,17 @@ def export(
         region_source=region_source,
         progress_callback=_emit_export_progress,
     )
+    if config.pipeline.storage_mode == "nas" and config.nas.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY:
+        marker = NasOutputIndex(data_paths, repository).latest_export_marker()
+        if marker is not None:
+            manifest_path = str(marker.get("export_manifest_path") or "")
+            export_folder = Path(manifest_path).parent if manifest_path else data_paths.exports_dir / "runs"
+            typer.echo(f"Exported {sample_count} approved sample(s)")
+            typer.echo(f"Export run: {marker.get('run_id')}")
+            typer.echo(f"Export folder: {export_folder}")
+            typer.echo(f"Export manifest: {manifest_path}")
+            typer.echo("Dataset media paths are relative to the export folder.")
+            return
     typer.echo(f"Exported {sample_count} approved sample(s) to {data_paths.export_datasets_dir}")
 
 

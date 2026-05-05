@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 import json
 import textwrap
+import uuid
 from contextlib import contextmanager
 from dataclasses import dataclass
 from html import escape
@@ -31,6 +32,7 @@ from ncai_pipeline.schemas.review import (
 )
 from ncai_pipeline.storage.locks import document_lock
 from ncai_pipeline.storage.paths import DataPaths
+from ncai_pipeline.storage.nas import CREATE_ONLY_PUBLISH_STRATEGY, NasOutputIndex
 from ncai_pipeline.storage.repository import FileRepository
 from ncai_pipeline.utils.time import utc_now, utc_now_iso
 
@@ -127,6 +129,7 @@ class InteractiveReviewService:
         storage_mode: str = "local",
         locks_enabled: bool = False,
         lock_stale_after_minutes: int = 240,
+        publish_strategy: str = "local_scratch_atomic",
     ) -> None:
         self.data_paths = data_paths
         self.repository = repository
@@ -135,6 +138,12 @@ class InteractiveReviewService:
         self.storage_mode = storage_mode
         self.locks_enabled = locks_enabled
         self.lock_stale_after_minutes = lock_stale_after_minutes
+        self.publish_strategy = publish_strategy
+        self.output_index = NasOutputIndex(data_paths, repository)
+
+    @property
+    def _create_only_nas(self) -> bool:
+        return self.storage_mode == "nas" and self.publish_strategy == CREATE_ONLY_PUBLISH_STRATEGY
 
     @contextmanager
     def _document_write_lock(self, document_id: str) -> Iterator[None]:
@@ -143,11 +152,13 @@ class InteractiveReviewService:
             document_id,
             self.repository,
             stale_after_minutes=self.lock_stale_after_minutes,
-            enabled=self.storage_mode == "nas" and self.locks_enabled,
+            enabled=self.storage_mode == "nas" and self.locks_enabled and not self._create_only_nas,
         ):
             yield
 
     def load_latest_run_summary(self) -> dict[str, Any] | None:
+        if self._create_only_nas:
+            return self.output_index.latest_run_summary()
         path = self.data_paths.status_dir / "latest_run.json"
         if path.exists():
             return self.repository.read_json(path)
@@ -168,6 +179,8 @@ class InteractiveReviewService:
         return None
 
     def load_latest_export_summary(self) -> dict[str, Any] | None:
+        if self._create_only_nas:
+            return self.output_index.latest_export_summary()
         path = self.data_paths.exports_dir / "export_manifest.json"
         if not path.exists():
             path = self.data_paths.export_target_dir / "export_manifest.json"
@@ -197,14 +210,18 @@ class InteractiveReviewService:
 
     def pipeline_status_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
-        for path in sorted(self.data_paths.manifests_dir.glob("*/manifest.json")):
-            manifest = self.repository.read_json(path)
+        if self._create_only_nas:
+            manifests = [marker.manifest for marker in self.output_index.latest_document_markers()]
+        else:
+            manifests = [self.repository.read_json(path) for path in sorted(self.data_paths.manifests_dir.glob("*/manifest.json"))]
+        for manifest in manifests:
             counts[manifest["status"]] = counts.get(manifest["status"], 0) + 1
         return counts
 
     def review_status_counts(self) -> dict[str, int]:
         counts: dict[str, int] = {}
-        for path in sorted(self.data_paths.status_dir.glob("*/review_record.json")):
+        paths = self.output_index.latest_review_record_paths() if self._create_only_nas else sorted(self.data_paths.status_dir.glob("*/review_record.json"))
+        for path in paths:
             record = ReviewRecord.model_validate(self.repository.read_json(path))
             counts[record.review_status.value] = counts.get(record.review_status.value, 0) + 1
         return counts
@@ -217,8 +234,14 @@ class InteractiveReviewService:
     ) -> list[QueueDocument]:
         review_by_document = self._load_review_record_map()
         queue: list[QueueDocument] = []
-        for path in sorted(self.data_paths.manifests_dir.glob("*/manifest.json")):
-            manifest = self.repository.read_json(path)
+        if self._create_only_nas:
+            manifest_items = [(marker.manifest_path, marker.manifest) for marker in self.output_index.latest_document_markers()]
+        else:
+            manifest_items = [
+                (path, self.repository.read_json(path))
+                for path in sorted(self.data_paths.manifests_dir.glob("*/manifest.json"))
+            ]
+        for path, manifest in manifest_items:
             document_id = manifest["document_id"]
             review_record = review_by_document.get(document_id)
             is_dry_run = bool(review_record and review_record.is_dry_run)
@@ -234,6 +257,9 @@ class InteractiveReviewService:
                 corrected = load_corrected_document(Path(review_record.corrected_output_path), self.repository)
                 is_dry_run = corrected_document_is_dry_run(corrected)
                 effective_review_status = corrected.approval_metadata.review_status.value
+                if self._create_only_nas:
+                    manifest = dict(manifest)
+                    manifest["status"] = self._pipeline_status_from_review(corrected).value
 
             if pipeline_status != "all" and manifest["status"] != pipeline_status:
                 continue
@@ -261,8 +287,17 @@ class InteractiveReviewService:
         return queue
 
     def get_document_context(self, document_id: str, page_number: int | None = None) -> DocumentContext:
-        manifest_path = self.data_paths.manifests_dir / document_id / "manifest.json"
-        review_record_path = self.data_paths.status_dir / document_id / "review_record.json"
+        if self._create_only_nas:
+            marker = self.output_index.latest_document_marker(document_id)
+            if marker is None:
+                raise FileNotFoundError(f"Manifest not found for document: {document_id}")
+            manifest_path = marker.manifest_path
+            review_record_path = self.output_index.latest_review_record_path(document_id)
+            if review_record_path is None:
+                raise FileNotFoundError(f"Review bundle not found for document: {document_id}")
+        else:
+            manifest_path = self.data_paths.manifests_dir / document_id / "manifest.json"
+            review_record_path = self.data_paths.status_dir / document_id / "review_record.json"
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest not found for document: {document_id}")
         if not review_record_path.exists():
@@ -709,6 +744,8 @@ class InteractiveReviewService:
         ]
 
     def page_image_path(self, document_id: str, page_number: int) -> str:
+        if self._create_only_nas:
+            return str(self.output_index.latest_page_image_path(document_id, page_number))
         return str(self.data_paths.rendered_pages_dir / document_id / f"page_{page_number:04d}.png")
 
     def page_image_size(self, document_id: str, page_number: int) -> tuple[int, int]:
@@ -717,6 +754,15 @@ class InteractiveReviewService:
             return image.size
 
     def report_uri(self, document_id: str) -> str | None:
+        if self._create_only_nas:
+            review_record_path = self.output_index.latest_review_record_path(document_id)
+            if review_record_path is None:
+                return None
+            record = ReviewRecord.model_validate(self.repository.read_json(review_record_path))
+            path = Path(record.report_path)
+            if not path.exists():
+                return None
+            return path.resolve().as_uri()
         path = self.data_paths.reports_dir / document_id / "report.html"
         if not path.exists():
             return None
@@ -724,13 +770,19 @@ class InteractiveReviewService:
 
     def _load_review_record_map(self) -> dict[str, ReviewRecord]:
         mapping: dict[str, ReviewRecord] = {}
-        for path in sorted(self.data_paths.status_dir.glob("*/review_record.json")):
+        paths = self.output_index.latest_review_record_paths() if self._create_only_nas else sorted(self.data_paths.status_dir.glob("*/review_record.json"))
+        for path in paths:
             record = ReviewRecord.model_validate(self.repository.read_json(path))
             mapping[record.document_id] = record
         return mapping
 
     def _load_corrected_bundle(self, document_id: str) -> tuple[CorrectedDocument, ReviewRecord]:
-        review_record_path = self.data_paths.status_dir / document_id / "review_record.json"
+        if self._create_only_nas:
+            review_record_path = self.output_index.latest_review_record_path(document_id)
+            if review_record_path is None:
+                raise FileNotFoundError(f"Review record not found for document: {document_id}")
+        else:
+            review_record_path = self.data_paths.status_dir / document_id / "review_record.json"
         if not review_record_path.exists():
             raise FileNotFoundError(f"Review record not found for document: {document_id}")
         review_record = ReviewRecord.model_validate(self.repository.read_json(review_record_path))
@@ -789,6 +841,9 @@ class InteractiveReviewService:
             review_record.review_status = status
 
     def _save_corrected_bundle(self, review_record: ReviewRecord, corrected: CorrectedDocument) -> None:
+        if self._create_only_nas:
+            self._save_corrected_bundle_create_only(review_record, corrected)
+            return
         with self._document_write_lock(corrected.document_id):
             corrected_path = Path(review_record.corrected_output_path)
             review_record_path = self.data_paths.status_dir / corrected.document_id / "review_record.json"
@@ -796,21 +851,80 @@ class InteractiveReviewService:
             self._refresh_review_report(review_record, corrected)
             self.repository.write_json(review_record_path, review_record)
 
+    def _save_corrected_bundle_create_only(self, review_record: ReviewRecord, corrected: CorrectedDocument) -> None:
+        revision_id = self._new_revision_id()
+        corrected_path = (
+            self.data_paths.correction_files_dir
+            / corrected.document_id
+            / "revisions"
+            / f"{revision_id}.corrected.yaml"
+        )
+        report_path = (
+            self.data_paths.reports_dir
+            / corrected.document_id
+            / "revisions"
+            / f"{revision_id}.report.html"
+        )
+        review_record_path = (
+            self.data_paths.status_dir
+            / "review_records"
+            / corrected.document_id
+            / "revisions"
+            / f"{revision_id}.review_record.json"
+        )
+        marker_path = (
+            self.data_paths.status_dir
+            / "review_revisions"
+            / corrected.document_id
+            / f"{revision_id}.complete.json"
+        )
+        updated_record = review_record.model_copy(deep=True)
+        updated_record.corrected_output_path = str(corrected_path)
+        updated_record.report_path = str(report_path)
+
+        report_html = self._render_review_report_html(updated_record, corrected, correction_path=corrected_path)
+        self.repository.create_yaml(corrected_path, corrected)
+        self.repository.create_text(report_path, report_html)
+        self.repository.create_json(review_record_path, updated_record)
+        self.repository.create_json(
+            marker_path,
+            {
+                "document_id": corrected.document_id,
+                "revision_id": revision_id,
+                "status": "completed",
+                "published_at": utc_now_iso(),
+                "publish_strategy": CREATE_ONLY_PUBLISH_STRATEGY,
+                "review_status": updated_record.review_status.value,
+                "review_record_path": str(review_record_path),
+                "correction_path": str(corrected_path),
+                "report_path": str(report_path),
+            },
+        )
+
     def _refresh_review_report(self, review_record: ReviewRecord, corrected: CorrectedDocument) -> None:
+        report_html = self._render_review_report_html(review_record, corrected, correction_path=Path(review_record.corrected_output_path))
+        self.repository.write_text(Path(review_record.report_path), report_html)
+
+    def _render_review_report_html(
+        self,
+        review_record: ReviewRecord,
+        corrected: CorrectedDocument,
+        *,
+        correction_path: Path,
+    ) -> str:
         page_image_paths = [
             Path(self.page_image_path(corrected.document_id, page.page_number or index))
             for index, page in enumerate(corrected.extracted_pages, start=1)
         ]
-        report_html = render_review_report(
+        return render_review_report(
             title=self.report_title,
             document_id=corrected.document_id,
             page_image_paths=page_image_paths,
             raw_records=self._load_raw_records(review_record),
             extractions=corrected.extracted_pages,
             corrected=corrected,
-            correction_path=Path(review_record.corrected_output_path),
+            correction_path=correction_path,
         )
-        self.repository.write_text(Path(review_record.report_path), report_html)
 
     def _sync_manifest_review_state(
         self,
@@ -819,6 +933,18 @@ class InteractiveReviewService:
         *,
         manifest_payload: dict[str, Any] | None = None,
     ) -> DocumentManifest:
+        if self._create_only_nas:
+            payload = manifest_payload
+            if payload is None:
+                latest = self.output_index.latest_manifest(document_id)
+                if latest is None:
+                    raise FileNotFoundError(f"Manifest not found for document: {document_id}")
+                payload = latest
+            manifest = DocumentManifest.model_validate(payload)
+            desired_status = self._pipeline_status_from_review(corrected)
+            manifest.status = desired_status
+            manifest.updated_at = utc_now()
+            return manifest
         manifest_path = self.data_paths.manifests_dir / document_id / "manifest.json"
         payload = manifest_payload if manifest_payload is not None else self.repository.read_json(manifest_path)
         manifest = DocumentManifest.model_validate(payload)
@@ -829,6 +955,10 @@ class InteractiveReviewService:
                 manifest.updated_at = utc_now()
                 self.repository.write_json(manifest_path, manifest)
         return manifest
+
+    def _new_revision_id(self) -> str:
+        timestamp = utc_now_iso().replace(":", "").replace("-", "").replace("+", "").replace(".", "_")
+        return f"{timestamp}_{uuid.uuid4().hex[:8]}"
 
     def _pipeline_status_from_review(self, corrected: CorrectedDocument) -> PipelineStatus:
         review_status = corrected.approval_metadata.review_status
@@ -915,6 +1045,8 @@ class InteractiveReviewService:
             return None
 
     def _save_parsed_page(self, extraction: NormalizedExtraction) -> None:
+        if self._create_only_nas:
+            return
         path = self.data_paths.parsed_dir / extraction.document_id / f"page_{(extraction.page_number or 0):04d}.json"
         self.repository.write_json(path, extraction)
 
@@ -926,7 +1058,15 @@ class InteractiveReviewService:
         *,
         fallback_page: NormalizedExtraction,
     ) -> NormalizedExtraction:
-        parsed_path = self.data_paths.parsed_dir / document_id / f"page_{page_number:04d}.json"
+        if self._create_only_nas:
+            marker = self.output_index.latest_document_marker(document_id)
+            parsed_path = (
+                self.data_paths.parsed_dir / document_id / marker.run_id / f"page_{page_number:04d}.json"
+                if marker is not None
+                else self.data_paths.parsed_dir / document_id / f"page_{page_number:04d}.json"
+            )
+        else:
+            parsed_path = self.data_paths.parsed_dir / document_id / f"page_{page_number:04d}.json"
         parsed_page: NormalizedExtraction | None = None
         if parsed_path.exists():
             parsed_page = NormalizedExtraction.model_validate(self.repository.read_json(parsed_path))

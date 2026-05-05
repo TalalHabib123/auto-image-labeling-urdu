@@ -21,20 +21,20 @@ pipeline:
 
 nas:
   input_root: '\\10.12.96.55\Development\NAB_Development\Talal\input'
-  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder'
+  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder\Modified_Pipeline'
   scratch_root: '.\temp\nas_scratch'
   share_label:
-  publish_strategy: "local_scratch_atomic"
+  publish_strategy: "local_scratch_create_only"
   healthcheck:
     enabled: true
     timeout_seconds: 10
-    require_writable_output: true
+    require_writable_output: false
   retry:
     attempts: 3
     backoff_seconds: 2.0
     max_backoff_seconds: 30.0
   locks:
-    enabled: true
+    enabled: false
     stale_after_minutes: 240
     heartbeat_seconds: 60
   timeouts:
@@ -78,9 +78,9 @@ export:
     test: 0.1
   target_format: "gemma_multimodal_jsonl"
   dataset_types:
-    - "page_text"
+    - "handwritten" 
   output_formats:
-    - "xlsx"
+    - "jsonl"
   region_source: "blocks"
   assets:
     page_strategy: "shared_copy"

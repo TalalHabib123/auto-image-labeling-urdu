@@ -151,6 +151,88 @@ class ExportAndValidationTests(unittest.TestCase):
             self.assertEqual(included_manifest.samples, 1)
             self.assertTrue((data_paths.dry_run_dir / "doc1" / "sample.json").exists())
 
+    def test_handwritten_only_export_writes_crops_without_page_assets(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_paths = DataPaths(root / "data")
+            data_paths.ensure()
+            repository = FileRepository()
+
+            extraction = normalize_provider_payload(
+                "doc1",
+                1,
+                {
+                    "language": "ur",
+                    "full_text": "handwritten sample",
+                    "structured_content": {"language": "ur"},
+                    "blocks": [
+                        {
+                            "block_id": "b1",
+                            "text": "handwritten sample",
+                            "bbox": [20, 10, 80, 100],
+                            "confidence_notes": "contains handwritten amount",
+                        }
+                    ],
+                    "lines": [],
+                    "tables": [],
+                    "warnings": [],
+                    "confidence_notes": [],
+                },
+            )
+            corrected = CorrectedDocument(
+                document_id="doc1",
+                approval_metadata=ApprovalMetadata(
+                    review_status=ReviewStatus.APPROVED,
+                    reviewer="qa",
+                ),
+                extracted_pages=[extraction],
+                consolidated_text="handwritten sample",
+                target_output={"full_text": "handwritten sample"},
+            )
+            correction_path = data_paths.correction_files_dir / "doc1" / "corrected.yaml"
+            repository.write_yaml(correction_path, corrected)
+            repository.write_json(
+                data_paths.status_dir / "doc1" / "review_record.json",
+                ReviewRecord(
+                    document_id="doc1",
+                    review_status=ReviewStatus.APPROVED,
+                    reviewer="qa",
+                    corrected_output_path=str(correction_path),
+                    raw_output_path=str(data_paths.raw_responses_dir / "doc1"),
+                    report_path=str(data_paths.reports_dir / "doc1" / "report.html"),
+                ),
+            )
+            rendered_dir = data_paths.rendered_pages_dir / "doc1"
+            rendered_dir.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (220, 220), color="white").save(rendered_dir / "page_0001.png")
+
+            config = AppConfig.model_validate(
+                {
+                    "pipeline": {
+                        "version": "test",
+                        "input_dir": str(data_paths.input_dir),
+                        "output_root": str(data_paths.root),
+                    },
+                    "provider": {"name": "gemini", "model_name": "fake-model", "api_base_url": "https://example.invalid"},
+                    "review": {"correction_format": "yaml", "report_title": "Test Review"},
+                    "export": {
+                        "instruction": "Test instruction",
+                        "split_ratios": {"train": 0.8, "val": 0.1, "test": 0.1},
+                        "target_format": "jsonl",
+                    },
+                    "logging": {"level": "INFO", "structured": True},
+                }
+            )
+
+            datasets, manifest = DatasetBuilder(config, data_paths, repository).build_datasets(dataset_types=["handwritten"])
+
+            self.assertEqual(manifest.stats.asset_counts["handwritten_crops"], 1)
+            self.assertNotIn("page_images", manifest.stats.asset_counts)
+            self.assertFalse((data_paths.export_page_assets_dir / "doc1" / "page_0001.png").exists())
+            self.assertTrue((data_paths.export_crop_assets_dir / "handwritten" / "doc1" / "page_0001" / "b1.png").exists())
+            self.assertEqual(datasets["handwritten"][0]["crop_path"], "assets/crops/handwritten/doc1/page_0001/b1.png")
+            self.assertNotIn("image_path", datasets["handwritten"][0])
+
     def test_dry_run_manager_keep_and_delete(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -426,14 +508,17 @@ class ExportAndValidationTests(unittest.TestCase):
 
             rows = []
             for handwritten_file in manifest["files"]["handwritten"]["jsonl"].values():
+                self.assertFalse(Path(handwritten_file).is_absolute())
+                handwritten_path = data_paths.exports_dir / handwritten_file
                 rows.extend(
                     json.loads(line)
-                    for line in Path(handwritten_file).read_text(encoding="utf-8").splitlines()
+                    for line in handwritten_path.read_text(encoding="utf-8").splitlines()
                     if line.strip()
                 )
             self.assertEqual(rows[0]["block_id"], "b1")
             self.assertEqual(rows[0]["handwritten_source"], "auto")
-            self.assertEqual(Path(rows[0]["crop_path"]), crop_path)
+            self.assertEqual(rows[0]["crop_path"], "assets/crops/handwritten/doc1/page_0001/b1.png")
+            self.assertEqual(data_paths.exports_dir / rows[0]["crop_path"], crop_path)
 
             self.assertTrue((data_paths.export_datasets_dir / "page_text" / "csv" / "train.csv").exists())
             xlsx_path = data_paths.export_datasets_dir / "page_text" / "xlsx" / "train.xlsx"

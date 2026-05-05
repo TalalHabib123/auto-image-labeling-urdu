@@ -213,6 +213,16 @@ Export outputs:
 - `data/exports/export_manifest.json`
 - legacy full JSONL aliases under `data/exports/gemma_multimodal/`
 
+When NAS create-only publishing is enabled, export output is versioned instead of updating stable files:
+
+- `<nas_output_root>/exports/runs/export_<timestamp>_<datasets>_<formats>_<id>/datasets/<dataset_id>/<format>/train.<ext>`
+- `<nas_output_root>/exports/runs/export_<timestamp>_<datasets>_<formats>_<id>/assets/pages/<document_id>/page_XXXX.png`
+- `<nas_output_root>/exports/runs/export_<timestamp>_<datasets>_<formats>_<id>/assets/crops/handwritten/<document_id>/page_XXXX/<block_id>.png`
+- `<nas_output_root>/exports/runs/export_<timestamp>_<datasets>_<formats>_<id>/export_manifest.json`
+- `<nas_output_root>/exports/completed/export_<timestamp>_<datasets>_<formats>_<id>.complete.json`
+
+Dataset records use portable media paths relative to the export folder, for example `assets/pages/<document_id>/page_0001.png` and `assets/crops/handwritten/<document_id>/page_0001/<block_id>.png`.
+
 Each exported sample contains:
 
 - input media paths
@@ -227,7 +237,7 @@ Supported dataset types:
 - `page_text`: one sample per page with page image path and `full_text`
 - `regions` with `--region-source blocks`: page-level block targets with bbox and handwritten flags
 - `regions` with `--region-source sections`: page-level structured sections
-- `handwritten`: one sample per handwritten block crop with crop path and text
+- `handwritten`: one sample per handwritten block crop with crop path and text; when this is the only selected dataset type, full page images are not exported
 
 Supported formats are `jsonl`, `json`, `csv`, and `xlsx`.
 

@@ -168,7 +168,7 @@ class NasSettings(BaseModel):
     output_root: str | None = None
     scratch_root: str | None = "data/nas_scratch"
     share_label: str | None = None
-    publish_strategy: Literal["local_scratch_atomic"] = "local_scratch_atomic"
+    publish_strategy: Literal["local_scratch_atomic", "local_scratch_create_only"] = "local_scratch_atomic"
     healthcheck: NasHealthcheckSettings = Field(default_factory=NasHealthcheckSettings)
     retry: NasRetrySettings = Field(default_factory=NasRetrySettings)
     locks: NasLockSettings = Field(default_factory=NasLockSettings)
@@ -375,6 +375,8 @@ class AppConfig(BaseModel):
             raise ValueError("nas.scratch_root must not be inside nas.input_root")
         if _is_relative_to(scratch_root, output_root):
             raise ValueError("nas.scratch_root must not be inside nas.output_root")
+        if self.nas.publish_strategy == "local_scratch_create_only" and self.nas.locks.enabled:
+            raise ValueError("nas.locks.enabled must be false when nas.publish_strategy is local_scratch_create_only")
         return self
 
 

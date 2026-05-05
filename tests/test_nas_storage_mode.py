@@ -13,6 +13,7 @@ from PIL import Image
 from ncai_pipeline.config import AppConfig, PipelineSettings
 from ncai_pipeline.cli import _write_exports
 from ncai_pipeline.ingestion.scanner import discover_documents
+from ncai_pipeline.interactive.service import InteractiveReviewService
 from ncai_pipeline.pipeline.orchestrator import PipelineOrchestrator
 from ncai_pipeline.providers.base import (
     ExtractionProvider,
@@ -23,6 +24,7 @@ from ncai_pipeline.providers.base import (
 )
 from ncai_pipeline.schemas.common import ReviewStatus, TokenUsage
 from ncai_pipeline.schemas.review import CorrectedDocument, ReviewRecord
+from ncai_pipeline.storage.nas import CREATE_ONLY_PUBLISH_STRATEGY, NasOutputIndex
 from ncai_pipeline.storage.paths import DataPaths
 from ncai_pipeline.storage.repository import FileRepository
 from ncai_pipeline.config import EnvironmentSettings, PromptRegistry
@@ -126,6 +128,14 @@ def nas_config(root: Path, input_root: Path, output_root: Path, scratch_root: Pa
             "export": {"instruction": "Test", "target_format": "jsonl"},
         }
     )
+
+
+def nas_create_only_config(root: Path, input_root: Path, output_root: Path, scratch_root: Path) -> AppConfig:
+    payload = nas_config(root, input_root, output_root, scratch_root).model_dump(mode="json")
+    payload["nas"]["publish_strategy"] = CREATE_ONLY_PUBLISH_STRATEGY
+    payload["nas"]["locks"]["enabled"] = False
+    payload["nas"]["healthcheck"]["require_writable_output"] = False
+    return AppConfig.model_validate(payload)
 
 
 class NasStorageModeTests(unittest.TestCase):
@@ -248,6 +258,123 @@ class NasStorageModeTests(unittest.TestCase):
             self.assertTrue((data_paths.export_target_dir / "train.jsonl").exists())
             self.assertTrue((data_paths.approved_dir / review_record.document_id / "sample.json").exists())
             self.assertFalse(any((scratch_root / "active").glob("*")) if (scratch_root / "active").exists() else False)
+
+    def test_repository_create_only_helpers_refuse_overwrite(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            repository = FileRepository()
+            target = root / "created.json"
+
+            repository.create_json(target, {"status": "created"})
+
+            self.assertEqual(repository.read_json(target)["status"], "created")
+            with self.assertRaises(FileExistsError):
+                repository.create_json(target, {"status": "overwrite"})
+            self.assertFalse(list(root.glob("*.tmp-*")))
+
+    def test_nas_create_only_run_publishes_versioned_marker_and_skips_rerun(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "nas_input"
+            output_root = root / "nas_output"
+            scratch_root = root / "local_scratch"
+            input_root.mkdir()
+            output_root.mkdir()
+            Image.new("RGB", (40, 20), color="white").save(input_root / "doc.png")
+            config = nas_create_only_config(root, input_root, output_root, scratch_root)
+            provider = NasFakeProvider()
+            repository = FileRepository()
+            orchestrator = PipelineOrchestrator(
+                config,
+                self.prompts,
+                EnvironmentSettings(),
+                DataPaths(output_root),
+                provider,
+                repository,
+            )
+
+            summary = orchestrator.run(dry_run=True)
+
+            self.assertEqual(summary["storage_mode"], "nas")
+            self.assertEqual(summary["processed_documents"], 1)
+            data_paths = DataPaths(output_root)
+            marker = NasOutputIndex(data_paths, repository).latest_document_markers()[0]
+            document_id = marker.document_id
+            self.assertEqual(marker.run_id, summary["run_id"])
+            self.assertTrue(marker.manifest_path.exists())
+            self.assertTrue(marker.review_record_path.exists())
+            self.assertTrue(marker.correction_path and marker.correction_path.exists())
+            self.assertTrue(marker.report_path and marker.report_path.exists())
+            self.assertFalse((data_paths.manifests_dir / document_id / "manifest.json").exists())
+            self.assertFalse((data_paths.status_dir / "latest_run.json").exists())
+            self.assertFalse(data_paths.staging_dir.exists())
+
+            second_summary = orchestrator.run(dry_run=True)
+
+            self.assertEqual(second_summary["skipped_documents"], 1)
+            self.assertEqual(provider.invocations, 1)
+
+    def test_nas_create_only_export_publishes_completed_export_marker(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "nas_input"
+            output_root = root / "nas_output"
+            scratch_root = root / "local_scratch"
+            input_root.mkdir()
+            output_root.mkdir()
+            Image.new("RGB", (40, 20), color="white").save(input_root / "doc.png")
+            config = nas_create_only_config(root, input_root, output_root, scratch_root)
+            repository = FileRepository()
+            provider = NasFakeProvider()
+            orchestrator = PipelineOrchestrator(
+                config,
+                self.prompts,
+                EnvironmentSettings(),
+                DataPaths(output_root),
+                provider,
+                repository,
+            )
+            orchestrator.run(dry_run=False)
+            data_paths = DataPaths(output_root)
+            document_id = NasOutputIndex(data_paths, repository).latest_document_markers()[0].document_id
+            service = InteractiveReviewService(
+                data_paths,
+                repository,
+                report_title=config.review.report_title,
+                storage_mode="nas",
+                locks_enabled=False,
+                publish_strategy=CREATE_ONLY_PUBLISH_STRATEGY,
+            )
+            service.set_document_review_status(document_id, status=ReviewStatus.APPROVED, reviewer="qa")
+
+            sample_count, _, _ = _write_exports(config, data_paths, repository)
+
+            self.assertEqual(sample_count, 1)
+            marker = NasOutputIndex(data_paths, repository).latest_export_marker()
+            self.assertIsNotNone(marker)
+            assert marker is not None
+            self.assertTrue(str(marker["run_id"]).startswith("export_"))
+            manifest_path = Path(str(marker["export_manifest_path"]))
+            manifest = repository.read_json(manifest_path)
+            full_files = manifest["files"]["full"]["jsonl"]
+            exported_records = []
+            for file_ref in full_files.values():
+                self.assertFalse(Path(file_ref).is_absolute())
+                file_path = manifest_path.parent / file_ref
+                exported_records.extend(
+                    json.loads(line)
+                    for line in file_path.read_text(encoding="utf-8").splitlines()
+                    if line.strip()
+                )
+            self.assertEqual(exported_records[0]["input_media_paths"][0], f"assets/pages/{document_id}/page_0001.png")
+            self.assertNotIn(str(scratch_root), exported_records[0]["input_media_paths"][0])
+            self.assertFalse((manifest_path.parent / "curated").exists())
+            self.assertFalse(list(manifest_path.parent.glob("datasets/*/*/export_manifest.json")))
+            export_summary = NasOutputIndex(data_paths, repository).latest_export_summary()
+            self.assertIsNotNone(export_summary)
+            self.assertTrue(any((data_paths.exports_dir / "completed").glob("*.complete.json")))
+            self.assertTrue(any((data_paths.exports_dir / "runs").glob("*/export_manifest.json")))
+            self.assertFalse((data_paths.exports_dir / "export_manifest.json").exists())
 
 
 if __name__ == "__main__":
