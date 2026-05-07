@@ -42,6 +42,38 @@ def _bbox_payload_from_fragment(fragment: Any) -> dict[str, float] | None:
     }
 
 
+def _page_nav_items(
+    page_summaries: list[Any],
+    selected_page_number: int,
+    *,
+    edge_count: int = 2,
+    radius: int = 4,
+) -> list[dict[str, Any]]:
+    if len(page_summaries) <= (edge_count * 2) + (radius * 2) + 1:
+        return [{"kind": "page", "summary": item} for item in page_summaries]
+
+    last_page = page_summaries[-1].page_number if page_summaries else selected_page_number
+    included_pages = {
+        item.page_number
+        for item in page_summaries
+        if item.page_number <= edge_count
+        or item.page_number > last_page - edge_count
+        or abs(item.page_number - selected_page_number) <= radius
+    }
+
+    items: list[dict[str, Any]] = []
+    previous_page: int | None = None
+    for summary in page_summaries:
+        page_number = summary.page_number
+        if page_number not in included_pages:
+            continue
+        if previous_page is not None and page_number - previous_page > 1:
+            items.append({"kind": "gap", "start": previous_page + 1, "end": page_number - 1})
+        items.append({"kind": "page", "summary": summary})
+        previous_page = page_number
+    return items
+
+
 DASHBOARD_TEMPLATE = TEMPLATE_ENV.from_string(
     """
 <!DOCTYPE html>
@@ -233,29 +265,27 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
   <title>Review {{ context.queue_entry.document_id }}</title>
   <style>
     :root {
-      --bg: #f6efe6;
-      --paper: rgba(255, 251, 245, 0.92);
-      --paper-strong: #fffdf8;
-      --line: #dac7b6;
-      --line-strong: #b99373;
-      --ink: #231712;
-      --muted: #695d55;
-      --accent: #8d4a2b;
-      --accent-soft: rgba(141, 74, 43, 0.12);
-      --ok: #2f6f4f;
-      --warn: #9a6b1d;
-      --bad: #8a2f2f;
-      --shadow: 0 24px 60px rgba(77, 50, 32, 0.08);
+      --bg: #f5f7fa;
+      --paper: rgba(255, 255, 255, 0.96);
+      --paper-strong: #ffffff;
+      --line: #d8dee8;
+      --line-strong: #a9b5c6;
+      --ink: #17202a;
+      --muted: #5e6a78;
+      --accent: #245b6b;
+      --accent-soft: rgba(36, 91, 107, 0.1);
+      --ok: #267553;
+      --warn: #9a6417;
+      --bad: #a43b3b;
+      --shadow: 0 14px 32px rgba(26, 39, 55, 0.08);
     }
     * { box-sizing: border-box; }
     html { scroll-behavior: smooth; }
     body {
       margin: 0;
       color: var(--ink);
-      background:
-        radial-gradient(circle at top left, rgba(255,255,255,0.6), transparent 30%),
-        linear-gradient(180deg, #fbf7f2 0%, var(--bg) 46%, #f1e5d7 100%);
-      font-family: "Segoe UI Variable", "Noto Naskh Arabic", Georgia, serif;
+      background: linear-gradient(180deg, #ffffff 0%, var(--bg) 54%, #edf1f6 100%);
+      font-family: "Segoe UI Variable", "Segoe UI", "Noto Naskh Arabic", Arial, sans-serif;
       overflow-x: hidden;
     }
     body.modal-open {
@@ -268,7 +298,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       color: var(--ink);
       background: var(--paper-strong);
       border: 1px solid var(--line);
-      border-radius: 14px;
+      border-radius: 8px;
     }
     button, .ghost-link, .toggle-link {
       transition: background-color 160ms ease, color 160ms ease, border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease;
@@ -284,7 +314,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     }
     input, select, textarea {
       width: 100%;
-      padding: 11px 13px;
+      padding: 10px 12px;
     }
     textarea {
       resize: vertical;
@@ -296,9 +326,9 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     }
     summary::-webkit-details-marker { display: none; }
     .shell {
-      width: min(1800px, calc(100vw - 32px));
+      width: min(1760px, calc(100vw - 28px));
       margin: 0 auto;
-      padding: 18px 0 160px;
+      padding: 14px 0 150px;
     }
     .topbar {
       display: flex;
@@ -309,8 +339,8 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     }
     .topbar h1 {
       margin: 0;
-      font-size: clamp(1.85rem, 1.5rem + 1vw, 2.7rem);
-      letter-spacing: 0.01em;
+      font-size: clamp(1.45rem, 1.1rem + 0.9vw, 2.2rem);
+      letter-spacing: 0;
       text-wrap: balance;
     }
     .topbar p {
@@ -330,14 +360,15 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       align-items: center;
       justify-content: center;
       gap: 8px;
-      min-height: 44px;
-      padding: 11px 16px;
-      border-radius: 999px;
+      min-height: 40px;
+      padding: 9px 14px;
+      border-radius: 8px;
       border: 1px solid var(--line-strong);
       text-decoration: none;
       background: transparent;
       color: var(--accent);
       font-weight: 650;
+      font-size: 0.92rem;
       cursor: pointer;
     }
     .ghost-link:hover, .toggle-link:hover {
@@ -348,40 +379,40 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       background: var(--accent);
       border-color: var(--accent);
       color: white;
-      box-shadow: 0 18px 40px rgba(141, 74, 43, 0.22);
+      box-shadow: 0 10px 22px rgba(36, 91, 107, 0.18);
     }
     button:hover {
-      background: #793b1f;
-      border-color: #793b1f;
+      background: #1d4c5a;
+      border-color: #1d4c5a;
       transform: translateY(-1px);
     }
     .state-rail {
       position: sticky;
-      top: 0;
+      top: 8px;
       z-index: 20;
       display: grid;
       grid-template-columns: repeat(7, minmax(0, 1fr));
-      gap: 12px;
+      gap: 0;
       margin: 0 10px 18px;
-      padding: 14px;
-      background: rgba(255, 250, 243, 0.88);
-      border: 1px solid rgba(185, 147, 115, 0.42);
-      border-radius: 22px;
-      backdrop-filter: blur(14px);
+      padding: 10px;
+      background: rgba(255, 255, 255, 0.9);
+      border: 1px solid rgba(169, 181, 198, 0.6);
+      border-radius: 8px;
+      backdrop-filter: blur(16px);
       box-shadow: var(--shadow);
     }
     .rail-item {
       min-width: 0;
-      padding: 8px 10px;
-      border-left: 1px solid rgba(185, 147, 115, 0.24);
+      padding: 6px 10px;
+      border-left: 1px solid rgba(169, 181, 198, 0.38);
     }
     .rail-item:first-child { border-left: 0; }
     .rail-label {
       display: block;
-      margin-bottom: 6px;
+      margin-bottom: 5px;
       color: var(--muted);
-      font-size: 0.78rem;
-      letter-spacing: 0.08em;
+      font-size: 0.72rem;
+      letter-spacing: 0;
       text-transform: uppercase;
     }
     .rail-value {
@@ -389,7 +420,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       align-items: center;
       gap: 8px;
       min-width: 0;
-      font-size: 1rem;
+      font-size: 0.95rem;
       font-weight: 700;
       word-break: break-word;
     }
@@ -405,7 +436,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       justify-content: center;
       padding: 5px 10px;
       border-radius: 999px;
-      font-size: 0.82rem;
+      font-size: 0.78rem;
       font-weight: 700;
       white-space: nowrap;
     }
@@ -420,25 +451,25 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       margin: 0 10px 18px;
     }
     .notice {
-      padding: 14px 16px;
-      border-radius: 18px;
-      border: 1px solid rgba(185, 147, 115, 0.4);
-      background: rgba(255, 246, 236, 0.92);
+      padding: 12px 14px;
+      border-radius: 8px;
+      border: 1px solid rgba(169, 181, 198, 0.6);
+      background: rgba(255, 255, 255, 0.96);
       color: var(--ink);
-      box-shadow: 0 16px 36px rgba(81, 53, 33, 0.06);
+      box-shadow: 0 12px 26px rgba(26, 39, 55, 0.06);
     }
     .workspace {
       display: grid;
-      grid-template-columns: 280px minmax(0, 1.05fr) minmax(0, 1.15fr);
-      gap: 18px;
+      grid-template-columns: minmax(226px, 260px) minmax(360px, 0.92fr) minmax(420px, 1.08fr);
+      gap: 14px;
       align-items: start;
       padding: 0 10px;
     }
     .panel {
       min-width: 0;
-      padding: 18px;
-      border-radius: 24px;
-      border: 1px solid rgba(185, 147, 115, 0.34);
+      padding: 16px;
+      border-radius: 8px;
+      border: 1px solid rgba(169, 181, 198, 0.62);
       background: var(--paper);
       box-shadow: var(--shadow);
     }
@@ -449,43 +480,91 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     .panel-heading {
       display: flex;
       justify-content: space-between;
-      align-items: baseline;
+      align-items: center;
       gap: 12px;
-      margin-bottom: 14px;
+      margin-bottom: 12px;
     }
     .panel-subtle {
       color: var(--muted);
-      font-size: 0.95rem;
+      font-size: 0.9rem;
+    }
+    .page-panel {
+      position: sticky;
+      top: 118px;
+      display: grid;
+      grid-template-rows: auto auto auto minmax(0, 1fr);
+      max-height: calc(100vh - 136px);
+      overflow: hidden;
+    }
+    .page-jump {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .page-jump input {
+      min-height: 38px;
+    }
+    .page-jump button {
+      min-width: 54px;
+      box-shadow: none;
+    }
+    .page-stepper {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+    .page-stepper .ghost-link,
+    .page-stepper .page-step-disabled {
+      min-height: 36px;
+      padding: 8px 10px;
+      font-size: 0.86rem;
+    }
+    .page-step-disabled {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      color: #8a96a5;
+      background: #f3f5f8;
+      font-weight: 650;
     }
     .page-nav {
       display: grid;
-      gap: 10px;
+      align-content: start;
+      gap: 8px;
+      min-height: 0;
+      overflow: auto;
+      padding-right: 4px;
+      scrollbar-width: thin;
     }
     .page-link {
       display: grid;
-      gap: 8px;
-      padding: 14px;
-      border-radius: 18px;
-      border: 1px solid rgba(185, 147, 115, 0.32);
-      background: rgba(255, 253, 248, 0.9);
+      gap: 7px;
+      padding: 10px;
+      border-radius: 8px;
+      border: 1px solid rgba(169, 181, 198, 0.62);
+      background: #ffffff;
       text-decoration: none;
       min-width: 0;
       transition: border-color 160ms ease, transform 160ms ease, box-shadow 160ms ease, background-color 160ms ease;
     }
     .page-link:hover {
       transform: translateY(-1px);
-      border-color: var(--line-strong);
-      box-shadow: 0 14px 26px rgba(81, 53, 33, 0.08);
+      border-color: var(--accent);
+      box-shadow: 0 10px 20px rgba(26, 39, 55, 0.08);
     }
     .page-link.active {
-      background: rgba(141, 74, 43, 0.08);
-      border-color: var(--line-strong);
+      background: rgba(36, 91, 107, 0.08);
+      border-color: var(--accent);
     }
     .page-link-header,
     .page-link-meta {
-      display: flex;
-      justify-content: space-between;
-      gap: 10px;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 5px 8px;
       align-items: center;
       min-width: 0;
     }
@@ -494,7 +573,16 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     }
     .meta-text {
       color: var(--muted);
-      font-size: 0.9rem;
+      font-size: 0.82rem;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
+    .page-gap {
+      padding: 5px 8px;
+      color: var(--muted);
+      font-size: 0.8rem;
+      text-align: center;
     }
     .preview-toggle {
       display: inline-flex;
@@ -505,14 +593,51 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       background: var(--accent);
       color: white;
       border-color: var(--accent);
-      box-shadow: 0 14px 30px rgba(141, 74, 43, 0.18);
+      box-shadow: 0 10px 22px rgba(36, 91, 107, 0.18);
     }
     .image-frame,
     .preview-frame {
-      border-radius: 22px;
-      border: 1px solid rgba(185, 147, 115, 0.28);
+      border-radius: 8px;
+      border: 1px solid rgba(169, 181, 198, 0.62);
       overflow: hidden;
       background: white;
+    }
+    .media-frame {
+      position: relative;
+      min-height: 320px;
+      aspect-ratio: var(--media-aspect, auto);
+      isolation: isolate;
+    }
+    .media-buffer {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      display: grid;
+      place-items: center;
+      gap: 10px;
+      align-content: center;
+      color: var(--muted);
+      background:
+        linear-gradient(90deg, rgba(245,247,250,0.85), rgba(255,255,255,0.96), rgba(245,247,250,0.85));
+      background-size: 220% 100%;
+      animation: media-buffer-sheen 1.4s ease-in-out infinite;
+      transition: opacity 160ms ease, visibility 160ms ease;
+    }
+    .media-buffer span:last-child {
+      font-size: 0.9rem;
+      font-weight: 650;
+    }
+    .loader {
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      border: 3px solid rgba(36, 91, 107, 0.16);
+      border-top-color: var(--accent);
+      animation: media-loader-spin 800ms linear infinite;
+    }
+    .media-frame.is-loaded .media-buffer {
+      opacity: 0;
+      visibility: hidden;
     }
     .image-frame img,
     .preview-frame img,
@@ -522,9 +647,25 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       height: auto;
       background: white;
     }
+    .media-frame > img,
+    .media-frame > object {
+      opacity: 0;
+      transition: opacity 180ms ease;
+    }
+    .media-frame.is-loaded > img,
+    .media-frame.is-loaded > object {
+      opacity: 1;
+    }
     .preview-frame object {
       min-height: 760px;
       border: 0;
+    }
+    @keyframes media-loader-spin {
+      to { transform: rotate(360deg); }
+    }
+    @keyframes media-buffer-sheen {
+      0% { background-position: 140% 0; }
+      100% { background-position: -80% 0; }
     }
     .bbox-trigger-group {
       display: grid;
@@ -744,7 +885,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       display: grid;
       gap: 16px;
       position: sticky;
-      top: 132px;
+      top: 118px;
     }
     .crop-empty {
       padding: 20px;
@@ -769,11 +910,11 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     .fragment-editor {
       display: grid;
       gap: 14px;
-      padding: 16px;
-      border-radius: 20px;
-      border: 1px solid rgba(185, 147, 115, 0.28);
-      background: rgba(255, 253, 249, 0.92);
-      scroll-margin-top: 132px;
+      padding: 14px;
+      border-radius: 8px;
+      border: 1px solid rgba(169, 181, 198, 0.56);
+      background: rgba(255, 255, 255, 0.94);
+      scroll-margin-top: 118px;
     }
     .fragment-head {
       display: flex;
@@ -814,8 +955,9 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     }
     .fragment-crop-frame {
       overflow: hidden;
-      border-radius: 18px;
-      border: 1px solid rgba(185, 147, 115, 0.22);
+      min-height: 132px;
+      border-radius: 8px;
+      border: 1px solid rgba(169, 181, 198, 0.56);
       background: white;
     }
     .fragment-crop-frame img {
@@ -825,6 +967,10 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       max-height: 320px;
       object-fit: contain;
       background: white;
+    }
+    .fragment-crop-frame img:not([src]) {
+      visibility: hidden;
+      min-height: 132px;
     }
     .fragment-crop-meta {
       display: flex;
@@ -847,9 +993,9 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       align-items: center;
       gap: 8px;
       padding: 8px 10px;
-      border: 1px solid rgba(185, 147, 115, 0.38);
+      border: 1px solid rgba(169, 181, 198, 0.62);
       border-radius: 999px;
-      background: rgba(255, 253, 248, 0.92);
+      background: rgba(255, 255, 255, 0.94);
       color: var(--ink);
       font-weight: 700;
     }
@@ -863,9 +1009,9 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     .handwriting-manual { background: rgba(47,111,79,0.16); color: var(--ok); }
     .fragment-empty {
       padding: 18px;
-      border-radius: 18px;
-      border: 1px dashed rgba(185, 147, 115, 0.35);
-      background: rgba(255, 252, 247, 0.78);
+      border-radius: 8px;
+      border: 1px dashed rgba(169, 181, 198, 0.7);
+      background: rgba(246, 248, 251, 0.9);
       color: var(--muted);
     }
     .data-drawer,
@@ -903,17 +1049,17 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       overflow: auto;
       white-space: pre-wrap;
       word-break: break-word;
-      border-radius: 16px;
-      border: 1px solid rgba(185, 147, 115, 0.26);
-      background: #fffdf8;
+      border-radius: 8px;
+      border: 1px solid rgba(169, 181, 198, 0.56);
+      background: #ffffff;
       padding: 14px;
       color: var(--ink);
     }
     .empty-copy {
       padding: 18px;
-      border-radius: 18px;
-      border: 1px dashed rgba(185, 147, 115, 0.4);
-      background: rgba(255, 252, 247, 0.7);
+      border-radius: 8px;
+      border: 1px dashed rgba(169, 181, 198, 0.7);
+      background: rgba(246, 248, 251, 0.9);
     }
     .save-bar {
       position: sticky;
@@ -922,13 +1068,13 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       display: grid;
       gap: 14px;
       margin: 18px 10px 0;
-      padding: 16px;
-      border-radius: 26px 26px 0 0;
-      border: 1px solid rgba(185, 147, 115, 0.42);
+      padding: 14px;
+      border-radius: 8px 8px 0 0;
+      border: 1px solid rgba(169, 181, 198, 0.62);
       border-bottom: 0;
-      background: rgba(255, 250, 243, 0.94);
+      background: rgba(255, 255, 255, 0.94);
       backdrop-filter: blur(16px);
-      box-shadow: 0 -24px 60px rgba(61, 39, 24, 0.08);
+      box-shadow: 0 -18px 42px rgba(26, 39, 55, 0.1);
       transition: padding 180ms ease, box-shadow 180ms ease, transform 180ms ease;
     }
     .save-bar-header {
@@ -970,7 +1116,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     }
     .save-bar.is-collapsed {
       padding-block: 12px;
-      box-shadow: 0 -14px 36px rgba(61, 39, 24, 0.06);
+      box-shadow: 0 -10px 26px rgba(26, 39, 55, 0.08);
     }
     .save-bar.is-collapsed .save-bar-body {
       max-height: 0;
@@ -1061,10 +1207,10 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     .review-panel {
       display: grid;
       gap: 14px;
-      padding: 18px;
-      border-radius: 22px;
-      border: 1px solid rgba(185, 147, 115, 0.34);
-      background: rgba(255, 252, 247, 0.9);
+      padding: 16px;
+      border-radius: 8px;
+      border: 1px solid rgba(169, 181, 198, 0.62);
+      background: rgba(255, 255, 255, 0.94);
     }
     .review-panel-header {
       display: flex;
@@ -1104,6 +1250,31 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       height: 1px;
       margin-top: 18px;
     }
+    .page-transition[hidden] {
+      display: none;
+    }
+    .page-transition {
+      position: fixed;
+      inset: 0;
+      z-index: 60;
+      display: grid;
+      place-items: center;
+      background: rgba(245, 247, 250, 0.74);
+      backdrop-filter: blur(6px);
+    }
+    .page-transition-card {
+      display: grid;
+      gap: 12px;
+      justify-items: center;
+      min-width: 240px;
+      padding: 22px 24px;
+      border-radius: 8px;
+      border: 1px solid rgba(169, 181, 198, 0.7);
+      background: #ffffff;
+      box-shadow: 0 18px 42px rgba(26, 39, 55, 0.14);
+      color: var(--muted);
+      font-weight: 650;
+    }
     @media (max-width: 1400px) {
       .state-rail { grid-template-columns: repeat(3, minmax(0, 1fr)); }
       .save-primary { grid-template-columns: 1fr; }
@@ -1112,7 +1283,9 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     }
     @media (max-width: 1180px) {
       .workspace { grid-template-columns: 1fr; }
-      .image-stack { position: static; }
+      .page-panel,
+      .image-stack { position: static; max-height: none; }
+      .page-nav { max-height: 320px; }
       .editor-form { grid-template-columns: 1fr; }
       .document-drawers,
       .settings-grid,
@@ -1135,12 +1308,19 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       .top-actions { justify-content: flex-start; }
       .save-bar-header { flex-direction: column; align-items: flex-start; }
       .save-bar-toggle { width: 100%; min-width: 0; }
+      .save-bar.is-collapsed .save-bar-heading,
+      .save-bar.is-collapsed .save-bar-header-meta .pill {
+        display: none;
+      }
+      .save-bar.is-collapsed .save-bar-header-meta {
+        width: 100%;
+      }
       .workspace,
       .document-drawers,
       .settings-grid,
       .state-rail { grid-template-columns: 1fr; }
-      .panel, .save-bar { border-radius: 20px; }
-      .save-bar { border-bottom: 1px solid rgba(185, 147, 115, 0.42); }
+      .panel, .save-bar { border-radius: 8px; }
+      .save-bar { border-bottom: 1px solid rgba(169, 181, 198, 0.62); }
       .bbox-actions,
       .bbox-grid { grid-template-columns: 1fr; }
       .bbox-modal-header,
@@ -1204,14 +1384,42 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     {% endif %}
 
     <main class="workspace">
-      <aside class="panel">
+      <aside class="panel page-panel">
         <div class="panel-heading">
           <h2>Pages</h2>
           <span class="panel-subtle">{{ context.queue_entry.page_count }} total</span>
         </div>
+        <form class="page-jump" method="get" action="/documents/{{ context.queue_entry.document_id }}" data-page-loading>
+          <input
+            type="number"
+            name="page"
+            min="1"
+            max="{{ context.queue_entry.page_count }}"
+            value="{{ context.selected_page_number }}"
+            aria-label="Jump to page"
+          />
+          <input type="hidden" name="preview" value="{{ preview_mode }}" />
+          <button type="submit" class="button-secondary">Go</button>
+        </form>
+        <div class="page-stepper" aria-label="Adjacent pages">
+          {% if previous_page_number %}
+          <a class="ghost-link" data-page-loading href="/documents/{{ context.queue_entry.document_id }}?page={{ previous_page_number }}&preview={{ preview_mode }}">Previous</a>
+          {% else %}
+          <span class="page-step-disabled">Previous</span>
+          {% endif %}
+          {% if next_page_number %}
+          <a class="ghost-link" data-page-loading href="/documents/{{ context.queue_entry.document_id }}?page={{ next_page_number }}&preview={{ preview_mode }}">Next</a>
+          {% else %}
+          <span class="page-step-disabled">Next</span>
+          {% endif %}
+        </div>
         <nav class="page-nav" aria-label="Page navigation">
-          {% for item in page_summaries %}
-          <a class="page-link {% if item.page_number == context.selected_page_number %}active{% endif %}" href="/documents/{{ context.queue_entry.document_id }}?page={{ item.page_number }}&preview={{ preview_mode }}">
+          {% for nav_item in page_nav_items %}
+          {% if nav_item.kind == "gap" %}
+          <div class="page-gap">Pages {{ nav_item.start }}-{{ nav_item.end }}</div>
+          {% else %}
+          {% set item = nav_item.summary %}
+          <a class="page-link {% if item.page_number == context.selected_page_number %}active{% endif %}" data-page-loading href="/documents/{{ context.queue_entry.document_id }}?page={{ item.page_number }}&preview={{ preview_mode }}">
             <div class="page-link-header">
               <strong>Page {{ item.page_number }}</strong>
               <span class="pill page-{{ item.review_status }}">{{ item.review_status }}</span>
@@ -1223,6 +1431,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
               <span class="meta-text">{% if item.warning_count %}{{ item.warning_count }} system alerts{% else %}clear{% endif %}</span>
             </div>
           </a>
+          {% endif %}
           {% endfor %}
         </nav>
       </aside>
@@ -1235,13 +1444,19 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
               <span class="panel-subtle page-dimensions">{{ context.page_image_width }} x {{ context.page_image_height }}</span>
               <span class="panel-subtle">{{ context.page_image_width }} × {{ context.page_image_height }}</span>
             </div>
-            <div class="image-frame">
+            <div class="image-frame media-frame is-loading" data-media-frame style="--media-aspect: {{ context.page_image_width }} / {{ context.page_image_height }};">
+              <div class="media-buffer" aria-hidden="true">
+                <span class="loader"></span>
+                <span>Loading page image</span>
+              </div>
               <img
+                data-media-image
                 src="/documents/{{ context.queue_entry.document_id }}/assets/page/{{ context.selected_page_number }}"
                 alt="Original document page {{ context.selected_page_number }}"
                 width="{{ context.page_image_width }}"
                 height="{{ context.page_image_height }}"
                 fetchpriority="high"
+                decoding="async"
               />
             </div>
           </div>
@@ -1256,26 +1471,24 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
             <p class="panel-subtle">Switch between the raw parsed mapping and the current corrected mapping.</p>
           </div>
           <div class="preview-toggle" aria-label="Preview mode">
-            <a class="toggle-link {% if preview_mode == 'raw' %}active{% endif %}" href="/documents/{{ context.queue_entry.document_id }}?page={{ context.selected_page_number }}&preview=raw">Raw Mapping</a>
-            <a class="toggle-link {% if preview_mode == 'corrected' %}active{% endif %}" href="/documents/{{ context.queue_entry.document_id }}?page={{ context.selected_page_number }}&preview=corrected">Corrected Mapping</a>
+            <a class="toggle-link {% if preview_mode == 'raw' %}active{% endif %}" data-page-loading href="/documents/{{ context.queue_entry.document_id }}?page={{ context.selected_page_number }}&preview=raw">Raw Mapping</a>
+            <a class="toggle-link {% if preview_mode == 'corrected' %}active{% endif %}" data-page-loading href="/documents/{{ context.queue_entry.document_id }}?page={{ context.selected_page_number }}&preview=corrected">Corrected Mapping</a>
           </div>
         </div>
-        <div class="preview-frame" style="margin-bottom: 16px;">
-          <object
-            data="/documents/{{ context.queue_entry.document_id }}/pages/{{ context.selected_page_number }}/preview?mode={{ preview_mode }}"
-            type="image/svg+xml"
-            aria-label="{{ preview_mode }} mapped preview for page {{ context.selected_page_number }}"
+        <div class="preview-frame media-frame is-loading" data-media-frame style="--media-aspect: {{ context.page_image_width }} / {{ context.page_image_height }}; margin-bottom: 16px;">
+          <div class="media-buffer" aria-hidden="true">
+            <span class="loader"></span>
+            <span>Building mapped preview</span>
+          </div>
+          <img
+            data-media-image
+            src="/documents/{{ context.queue_entry.document_id }}/pages/{{ context.selected_page_number }}/preview?mode={{ preview_mode }}"
+            alt="{{ preview_mode }} mapped preview for page {{ context.selected_page_number }}"
             width="{{ context.page_image_width }}"
             height="{{ context.page_image_height }}"
-          >
-            <img
-              src="/documents/{{ context.queue_entry.document_id }}/pages/{{ context.selected_page_number }}/preview?mode={{ preview_mode }}"
-              alt="{{ preview_mode }} mapped preview for page {{ context.selected_page_number }}"
-              width="{{ context.page_image_width }}"
-              height="{{ context.page_image_height }}"
-              fetchpriority="high"
-            />
-          </object>
+            fetchpriority="high"
+            decoding="async"
+          />
         </div>
       </section>
 
@@ -1334,12 +1547,24 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
             </div>
             {% endif %}
             {% if fragment.has_bbox %}
-            <div class="fragment-crop-frame">
+            <div class="fragment-crop-frame media-frame is-loading" data-media-frame>
+              <div class="media-buffer" aria-hidden="true">
+                <span class="loader"></span>
+                <span>Loading crop</span>
+              </div>
               <img
-                src="/documents/{{ context.queue_entry.document_id }}/pages/{{ context.selected_page_number }}/crops/{{ fragment.fragment_id }}"
+                data-media-image
+                data-lazy-src="/documents/{{ context.queue_entry.document_id }}/pages/{{ context.selected_page_number }}/crops/{{ fragment.fragment_id }}"
                 alt="{{ fragment.label }} crop from page {{ context.selected_page_number }}"
                 loading="lazy"
+                decoding="async"
               />
+              <noscript>
+                <img
+                  src="/documents/{{ context.queue_entry.document_id }}/pages/{{ context.selected_page_number }}/crops/{{ fragment.fragment_id }}"
+                  alt="{{ fragment.label }} crop from page {{ context.selected_page_number }}"
+                />
+              </noscript>
             </div>
             <div class="fragment-crop-meta">
               <span>Reference crop</span>
@@ -1686,6 +1911,13 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
     </footer>
   </div>
 
+  <div class="page-transition" id="page-transition" hidden aria-live="polite" aria-label="Loading page">
+    <div class="page-transition-card">
+      <span class="loader"></span>
+      <span>Loading selected page</span>
+    </div>
+  </div>
+
   <script>
     (function () {
       let dirty = false;
@@ -1693,6 +1925,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       const saveBarBody = document.getElementById("save-bar-body");
       const saveBarToggle = document.getElementById("save-bar-toggle");
       const saveBarSentinel = document.getElementById("save-bar-sentinel");
+      const pageTransition = document.getElementById("page-transition");
       const bboxPayloadInput = document.getElementById("bbox_payload_json");
       const bboxEditorDataNode = document.getElementById("bbox-editor-data");
       const bboxEditorModal = document.getElementById("bbox-editor-modal");
@@ -1718,6 +1951,96 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
         bottom: document.getElementById("bbox-bottom"),
       };
       let bboxState = null;
+
+      function showPageTransition() {
+        if (pageTransition) {
+          pageTransition.hidden = false;
+        }
+      }
+
+      function markMediaLoaded(image) {
+        const frame = image.closest("[data-media-frame]");
+        if (!frame) {
+          return;
+        }
+        frame.classList.remove("is-loading");
+        frame.classList.add("is-loaded");
+      }
+
+      function prepareMediaImage(image) {
+        if (!image) {
+          return;
+        }
+        if (image.complete && (image.currentSrc || image.getAttribute("src"))) {
+          markMediaLoaded(image);
+          return;
+        }
+        image.addEventListener("load", function () {
+          markMediaLoaded(image);
+        }, { once: true });
+        image.addEventListener("error", function () {
+          markMediaLoaded(image);
+        }, { once: true });
+      }
+
+      function activateLazyImage(image) {
+        const lazySrc = image.dataset.lazySrc;
+        if (!lazySrc) {
+          return;
+        }
+        prepareMediaImage(image);
+        image.src = lazySrc;
+        image.removeAttribute("data-lazy-src");
+      }
+
+      document.querySelectorAll("img[data-media-image]:not([data-lazy-src])").forEach(prepareMediaImage);
+      const lazyImages = Array.from(document.querySelectorAll("img[data-lazy-src]"));
+      if ("IntersectionObserver" in window) {
+        const mediaObserver = new IntersectionObserver(
+          function (entries, observer) {
+            entries.forEach(function (entry) {
+              if (!entry.isIntersecting) {
+                return;
+              }
+              activateLazyImage(entry.target);
+              observer.unobserve(entry.target);
+            });
+          },
+          { rootMargin: "360px 0px" }
+        );
+        lazyImages.forEach(function (image) {
+          mediaObserver.observe(image);
+        });
+      } else {
+        lazyImages.forEach(activateLazyImage);
+      }
+
+      document.addEventListener("click", function (event) {
+        const link = event.target.closest("a[data-page-loading]");
+        if (!link || event.defaultPrevented || dirty || link.href === window.location.href) {
+          return;
+        }
+        showPageTransition();
+      });
+
+      document.addEventListener("submit", function (event) {
+        if (event.target && event.target.matches("form[data-page-loading]")) {
+          showPageTransition();
+        }
+      });
+
+      const pageNav = document.querySelector(".page-nav");
+      const activePageLink = pageNav ? pageNav.querySelector(".page-link.active") : null;
+      if (pageNav && activePageLink) {
+        const navRect = pageNav.getBoundingClientRect();
+        const activeRect = activePageLink.getBoundingClientRect();
+        const activeTop = (activeRect.top - navRect.top) + pageNav.scrollTop;
+        const compactNav = window.matchMedia && window.matchMedia("(max-width: 760px)").matches;
+        pageNav.scrollTop = Math.max(
+          compactNav ? activeTop - 8 : activeTop - (pageNav.clientHeight / 2) + (activeRect.height / 2),
+          0
+        );
+      }
 
       function setSaveBarExpanded(expanded) {
         if (!saveBar || !saveBarToggle) {
@@ -2425,9 +2748,22 @@ class InteractiveWebController:
             "corrected_at": serialize_timestamp(context.corrected.approval_metadata.corrected_at),
             "document_reviewed_at": serialize_timestamp(context.corrected.approval_metadata.reviewed_at),
         }
+        previous_page_number = (
+            context.page_summaries[context.selected_page_index - 1].page_number
+            if context.selected_page_index > 0
+            else None
+        )
+        next_page_number = (
+            context.page_summaries[context.selected_page_index + 1].page_number
+            if context.selected_page_index + 1 < len(context.page_summaries)
+            else None
+        )
         html = DOCUMENT_TEMPLATE.render(
             context=context,
             page_summaries=context.page_summaries,
+            page_nav_items=_page_nav_items(context.page_summaries, context.selected_page_number),
+            previous_page_number=previous_page_number,
+            next_page_number=next_page_number,
             page_status_counts=context.page_status_counts,
             page_workspace=context.selected_page_workspace,
             preview_mode=preview_mode,
@@ -2469,6 +2805,7 @@ class InteractiveWebController:
             status_code=HTTPStatus.OK,
             body=image_path.read_bytes(),
             content_type=mime_type or "application/octet-stream",
+            headers={"Cache-Control": "private, max-age=3600"},
         )
 
     def _serve_page_preview(self, path: str, query: dict[str, list[str]]) -> WebResponse:
@@ -2481,6 +2818,7 @@ class InteractiveWebController:
             status_code=HTTPStatus.OK,
             body=svg.encode("utf-8"),
             content_type="image/svg+xml; charset=utf-8",
+            headers={"Cache-Control": "no-store"},
         )
 
     def _serve_fragment_crop(self, path: str) -> WebResponse:
@@ -2489,7 +2827,7 @@ class InteractiveWebController:
         page_number = int(parts[3])
         fragment_id = unquote(parts[-1])
         crop = self.service.load_fragment_crop(document_id, page_number, fragment_id)
-        return WebResponse(status_code=HTTPStatus.OK, body=crop, content_type="image/png")
+        return WebResponse(status_code=HTTPStatus.OK, body=crop, content_type="image/png", headers={"Cache-Control": "no-store"})
 
     def _serve_report(self, path: str) -> WebResponse:
         document_id = unquote(path.split("/")[2])

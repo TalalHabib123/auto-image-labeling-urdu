@@ -122,6 +122,18 @@ class DocumentContext:
     command_hints: dict[str, str]
 
 
+@dataclass
+class PageMediaContext:
+    selected_page_number: int
+    page_image_path: str
+    page_image_width: int
+    page_image_height: int
+    selected_page: NormalizedExtraction
+    selected_raw_page: NormalizedExtraction
+    selected_page_workspace: PageWorkspace
+    selected_raw_workspace: PageWorkspace
+
+
 class InteractiveReviewService:
     def __init__(
         self,
@@ -295,23 +307,27 @@ class InteractiveReviewService:
             )
         return queue
 
-    def get_document_context(self, document_id: str, page_number: int | None = None) -> DocumentContext:
+    def _review_paths(self, document_id: str) -> tuple[Path, Path]:
         if self._create_only_nas:
             marker = self.output_index.latest_document_marker(document_id)
             if marker is None:
                 raise FileNotFoundError(f"Manifest not found for document: {document_id}")
-            manifest_path = marker.manifest_path
+            manifest_path = Path(marker.manifest_path)
             review_record_path = self.output_index.latest_review_record_path(document_id)
             if review_record_path is None:
                 raise FileNotFoundError(f"Review bundle not found for document: {document_id}")
+            review_path = Path(review_record_path)
         else:
             manifest_path = self.data_paths.manifests_dir / document_id / "manifest.json"
-            review_record_path = self.data_paths.status_dir / document_id / "review_record.json"
+            review_path = self.data_paths.status_dir / document_id / "review_record.json"
         if not manifest_path.exists():
             raise FileNotFoundError(f"Manifest not found for document: {document_id}")
-        if not review_record_path.exists():
+        if not review_path.exists():
             raise FileNotFoundError(f"Review bundle not found for document: {document_id}")
+        return manifest_path, review_path
 
+    def get_document_context(self, document_id: str, page_number: int | None = None) -> DocumentContext:
+        manifest_path, review_record_path = self._review_paths(document_id)
         manifest = self.repository.read_json(manifest_path)
         review_record = ReviewRecord.model_validate(self.repository.read_json(review_record_path))
         corrected = load_corrected_document(Path(review_record.corrected_output_path), self.repository)
@@ -354,16 +370,16 @@ class InteractiveReviewService:
         processing_by_page = self._page_processing_by_number(corrected)
         for index, page in enumerate(corrected.extracted_pages, start=1):
             effective_page_number = page.page_number or index
-            page_workspace = self.build_page_workspace(page)
+            fragment_mode, fragment_count, handwritten_count = self._page_summary_counts(page)
             page_summaries.append(
                 PageSummary(
                     page_number=effective_page_number,
                     review_status=reviews_by_page[effective_page_number].status.value,
                     processing_status=processing_by_page.get(effective_page_number, PageProcessingStatus.OCR_SUCCEEDED.value),
                     warning_count=len(self.filter_display_warnings(page.warnings)),
-                    fragment_count=len(page_workspace.fragments),
-                    fragment_mode=page_workspace.mode,
-                    handwritten_count=page_workspace.handwritten_count,
+                    fragment_count=fragment_count,
+                    fragment_mode=fragment_mode,
+                    handwritten_count=handwritten_count,
                 )
             )
 
@@ -394,6 +410,35 @@ class InteractiveReviewService:
             latest_run_summary=self.load_latest_run_summary(),
             latest_export_summary=self.load_latest_export_summary(),
             command_hints=self.command_hints(document_id),
+        )
+
+    def get_page_media_context(self, document_id: str, page_number: int) -> PageMediaContext:
+        _, review_record_path = self._review_paths(document_id)
+        review_record = ReviewRecord.model_validate(self.repository.read_json(review_record_path))
+        corrected = load_corrected_document(Path(review_record.corrected_output_path), self.repository)
+        selected_page_index = self._resolve_page_index(corrected, page_number)
+        selected_page_number = corrected.extracted_pages[selected_page_index].page_number or (selected_page_index + 1)
+        raw_records = self._load_raw_records(review_record)
+        self._auto_heal_placeholder_pages(
+            document_id,
+            corrected,
+            review_record,
+            raw_records,
+            page_numbers={selected_page_number},
+        )
+        selected_page = corrected.extracted_pages[selected_page_index]
+        selected_raw_page = self._load_raw_page(document_id, selected_page_number, raw_records, fallback_page=selected_page)
+        page_image_path = self.page_image_path(document_id, selected_page_number)
+        image_width, image_height = self.page_image_size(document_id, selected_page_number)
+        return PageMediaContext(
+            selected_page_number=selected_page_number,
+            page_image_path=page_image_path,
+            page_image_width=image_width,
+            page_image_height=image_height,
+            selected_page=selected_page,
+            selected_raw_page=selected_raw_page,
+            selected_page_workspace=self.build_page_workspace(selected_page),
+            selected_raw_workspace=self.build_page_workspace(selected_raw_page),
         )
 
     def save_page_edits(
@@ -651,6 +696,18 @@ class InteractiveReviewService:
         counts["reviewable"] = counts.get(PageProcessingStatus.OCR_SUCCEEDED.value, 0)
         return counts
 
+    def _page_summary_counts(self, page: NormalizedExtraction) -> tuple[str, int, int]:
+        if page.blocks:
+            handwritten_count = sum(
+                1
+                for block in page.blocks
+                if bool(block_handwriting_status(block)["handwritten_effective"])
+            )
+            return "blocks", len(page.blocks), handwritten_count
+        if page.lines:
+            return "lines", len(page.lines), 0
+        return "full_text", 1, 0
+
     def build_page_workspace(self, page: NormalizedExtraction) -> PageWorkspace:
         fragments: list[PageFragment] = []
         if page.blocks:
@@ -714,7 +771,7 @@ class InteractiveReviewService:
         )
 
     def build_page_preview_svg(self, document_id: str, page_number: int, mode: str = "corrected") -> str:
-        context = self.get_document_context(document_id, page_number=page_number)
+        context = self.get_page_media_context(document_id, page_number=page_number)
         normalized_mode = "raw" if mode == "raw" else "corrected"
         workspace = context.selected_raw_workspace if normalized_mode == "raw" else context.selected_page_workspace
         page = context.selected_raw_page if normalized_mode == "raw" else context.selected_page
@@ -730,7 +787,7 @@ class InteractiveReviewService:
         )
 
     def load_fragment_crop(self, document_id: str, page_number: int, fragment_id: str) -> bytes:
-        context = self.get_document_context(document_id, page_number=page_number)
+        context = self.get_page_media_context(document_id, page_number=page_number)
         fragment = self._find_fragment(context.selected_page_workspace, fragment_id)
         if fragment is None:
             fragment = self._find_fragment(context.selected_raw_workspace, fragment_id)
@@ -1077,6 +1134,7 @@ class InteractiveReviewService:
         corrected: CorrectedDocument,
         review_record: ReviewRecord,
         raw_records: list[RawExtractionRecord],
+        page_numbers: set[int] | None = None,
     ) -> list[int]:
         healed_pages: list[int] = []
         if not corrected.extracted_pages:
@@ -1086,6 +1144,8 @@ class InteractiveReviewService:
         updated = False
         for index, page in enumerate(corrected.extracted_pages, start=1):
             page_number = page.page_number or index
+            if page_numbers is not None and page_number not in page_numbers:
+                continue
             if not self._page_is_parse_placeholder(page):
                 continue
             raw_record = self._raw_record_for_page(raw_records, page_number)
