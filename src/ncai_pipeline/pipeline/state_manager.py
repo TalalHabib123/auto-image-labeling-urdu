@@ -8,6 +8,7 @@ from ncai_pipeline.utils.time import utc_now
 class StateManager:
     terminal_statuses = {
         PipelineStatus.REVIEW_PENDING,
+        PipelineStatus.IN_REVIEW,
         PipelineStatus.APPROVED,
         PipelineStatus.REJECTED,
         PipelineStatus.SKIPPED,
@@ -23,4 +24,3 @@ class StateManager:
         manifest.error_details = error_details
         manifest.updated_at = utc_now()
         return manifest
-

@@ -21,7 +21,7 @@ from ncai_pipeline.parsing.normalizer import normalize_provider_payload
 from ncai_pipeline.parsing.validators import load_corrected_document
 from ncai_pipeline.pipeline.dry_run_manager import DryRunArtifactManager
 from ncai_pipeline.schemas.common import ApprovalMetadata, ReviewStatus
-from ncai_pipeline.schemas.review import CorrectedDocument, ReviewRecord
+from ncai_pipeline.schemas.review import CorrectedDocument, PageReviewState, PageVerificationStatus, ReviewRecord
 from ncai_pipeline.storage.paths import DataPaths
 from ncai_pipeline.storage.repository import FileRepository
 
@@ -150,6 +150,80 @@ class ExportAndValidationTests(unittest.TestCase):
             self.assertEqual(included_samples[0].document_id, "doc1")
             self.assertEqual(included_manifest.samples, 1)
             self.assertTrue((data_paths.dry_run_dir / "doc1" / "sample.json").exists())
+
+    def test_dataset_builder_exports_verified_pages_without_document_approval_and_splits_by_page(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            data_paths = DataPaths(root / "data")
+            data_paths.ensure()
+            repository = FileRepository()
+
+            pages = [
+                normalize_provider_payload(
+                    "doc1",
+                    page_number,
+                    {
+                        "language": "ur",
+                        "full_text": f"page {page_number}",
+                        "structured_content": {"language": "ur"},
+                        "blocks": [],
+                        "lines": [],
+                        "tables": [],
+                        "warnings": [],
+                        "confidence_notes": [],
+                    },
+                )
+                for page_number in (1, 3)
+            ]
+            corrected = CorrectedDocument(
+                document_id="doc1",
+                approval_metadata=ApprovalMetadata(review_status=ReviewStatus.IN_REVIEW, reviewer="qa"),
+                extracted_pages=pages,
+                page_reviews=[
+                    PageReviewState(page_number=1, status=PageVerificationStatus.VERIFIED, reviewer="qa"),
+                    PageReviewState(page_number=3, status=PageVerificationStatus.VERIFIED, reviewer="qa"),
+                ],
+                consolidated_text="page 1\n\npage 3",
+            )
+            correction_path = data_paths.correction_files_dir / "doc1" / "corrected.yaml"
+            repository.write_yaml(correction_path, corrected)
+            repository.write_json(
+                data_paths.status_dir / "doc1" / "review_record.json",
+                ReviewRecord(
+                    document_id="doc1",
+                    review_status=ReviewStatus.IN_REVIEW,
+                    reviewer="qa",
+                    corrected_output_path=str(correction_path),
+                    raw_output_path=str(data_paths.raw_responses_dir / "doc1"),
+                    report_path=str(data_paths.reports_dir / "doc1" / "report.html"),
+                ),
+            )
+            rendered_dir = data_paths.rendered_pages_dir / "doc1"
+            rendered_dir.mkdir(parents=True, exist_ok=True)
+            Image.new("RGB", (220, 220), color="white").save(rendered_dir / "page_0001.png")
+            Image.new("RGB", (220, 220), color="white").save(rendered_dir / "page_0003.png")
+
+            config = AppConfig.model_validate(
+                {
+                    "pipeline": {"version": "test", "input_dir": str(data_paths.input_dir), "output_root": str(data_paths.root)},
+                    "provider": {"name": "gemini", "model_name": "fake-model", "api_base_url": "https://example.invalid"},
+                    "review": {"correction_format": "yaml", "report_title": "Test Review"},
+                    "export": {
+                        "instruction": "Test instruction",
+                        "split_ratios": {"train": 0.8, "val": 0.1, "test": 0.1},
+                        "target_format": "jsonl",
+                    },
+                    "logging": {"level": "INFO", "structured": True},
+                }
+            )
+
+            datasets, manifest = DatasetBuilder(config, data_paths, repository).build_datasets(dataset_types=["page_text", "full"])
+
+            self.assertEqual(manifest.stats.dataset_counts["page_text"], 2)
+            self.assertEqual(manifest.stats.dataset_counts["full"], 2)
+            self.assertEqual({record["source_split"] for record in datasets["page_text"]}, {"train", "val"})
+            self.assertEqual([record["page_number"] for record in datasets["page_text"]], [1, 3])
+            self.assertEqual([record["page_refs"] for record in datasets["full"]], [[1], [3]])
 
     def test_handwritten_only_export_writes_crops_without_page_assets(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

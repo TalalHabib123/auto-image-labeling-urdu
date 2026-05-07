@@ -8,7 +8,7 @@ import sys
 
 sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "src").resolve()))
 
-from PIL import Image
+from PIL import Image, ImageDraw
 
 from ncai_pipeline.config import AppConfig, PipelineSettings
 from ncai_pipeline.cli import _write_exports
@@ -96,6 +96,68 @@ class NasFakeProvider(ExtractionProvider):
         raw_response_json: dict | None,
     ) -> dict:
         return json.loads(raw_response_text or "{}")
+
+
+class NasSequencedProvider(NasFakeProvider):
+    def __init__(self, results: list[ProviderInvocationResult]) -> None:
+        super().__init__()
+        self.results = list(results)
+
+    def invoke(self, request: ProviderRequestEnvelope, dry_run: bool = False) -> ProviderInvocationResult:
+        self.invocations += 1
+        return self.results.pop(0)
+
+
+def create_three_page_pdf(path: Path) -> None:
+    pages = []
+    for index in range(3):
+        image = Image.new("RGB", (96, 96), color="white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((10, 18 + index * 8, 82, 34 + index * 8), fill="black")
+        pages.append(image)
+    pages[0].save(path, format="PDF", save_all=True, append_images=pages[1:])
+
+
+def page_result(page_number: int, text: str) -> ProviderInvocationResult:
+    payload = {
+        "page_number": page_number,
+        "language": "ur",
+        "full_text": text,
+        "structured_content": {"language": "ur"},
+        "blocks": [],
+        "lines": [],
+        "tables": [],
+        "warnings": [],
+        "confidence_notes": [],
+    }
+    return ProviderInvocationResult(
+        status="succeeded",
+        raw_response_text=json.dumps(payload),
+        raw_response_json={"payload": payload},
+        token_usage=TokenUsage(prompt_tokens=1, output_tokens=1, total_tokens=2),
+        latency_ms=1,
+    )
+
+
+def normalization_error_result() -> ProviderInvocationResult:
+    payload = {
+        "page_number": 2,
+        "language": "ur",
+        "full_text": "bad page",
+        "structured_content": {"language": "ur"},
+        "blocks": [{"block_id": "b1", "text": "bad page", "handwritten_auto": {"not": "a bool"}}],
+        "lines": [],
+        "tables": [],
+        "warnings": [],
+        "confidence_notes": [],
+    }
+    return ProviderInvocationResult(
+        status="succeeded",
+        raw_response_text=json.dumps(payload),
+        raw_response_json={"payload": payload},
+        token_usage=TokenUsage(prompt_tokens=1, output_tokens=1, total_tokens=2),
+        latency_ms=1,
+    )
 
 
 def nas_config(root: Path, input_root: Path, output_root: Path, scratch_root: Path) -> AppConfig:
@@ -218,6 +280,104 @@ class NasStorageModeTests(unittest.TestCase):
             self.assertTrue((data_paths.run_manifests_dir / f"{summary['run_id']}.json").exists())
             self.assertFalse((scratch_root / "active" / str(summary["run_id"])).exists())
 
+    def test_nas_partial_page_failure_publishes_and_rerun_reuses_successes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "nas_input"
+            output_root = root / "nas_output"
+            scratch_root = root / "local_scratch"
+            input_root.mkdir()
+            output_root.mkdir()
+            create_three_page_pdf(input_root / "doc.pdf")
+            config = nas_config(root, input_root, output_root, scratch_root)
+            repository = FileRepository()
+            provider = NasSequencedProvider(
+                [
+                    page_result(1, "page 1"),
+                    normalization_error_result(),
+                    page_result(3, "page 3"),
+                    page_result(2, "page 2"),
+                ]
+            )
+            orchestrator = PipelineOrchestrator(
+                config,
+                self.prompts,
+                EnvironmentSettings(),
+                DataPaths(output_root),
+                provider,
+                repository,
+            )
+
+            first_summary = orchestrator.run(dry_run=False)
+            data_paths = DataPaths(output_root)
+            manifest_path = next(data_paths.manifests_dir.glob("*/manifest.json"))
+            first_manifest = repository.read_json(manifest_path)
+            document_id = first_manifest["document_id"]
+
+            self.assertEqual(first_summary["failed_documents"], 1)
+            self.assertEqual(first_manifest["status"], "failed")
+            self.assertTrue((data_paths.completion_markers_dir / f"{document_id}.complete.json").exists())
+            self.assertTrue((data_paths.correction_files_dir / document_id / "corrected.yaml").exists())
+            self.assertEqual(len(list((data_paths.raw_responses_dir / document_id).glob("*.json"))), 3)
+
+            second_summary = orchestrator.run(dry_run=False)
+            final_manifest = repository.read_json(manifest_path)
+
+            self.assertEqual(second_summary["succeeded_documents"], 1)
+            self.assertEqual(second_summary["reused_ocr_pages"], 2)
+            self.assertEqual(provider.invocations, 4)
+            self.assertEqual(len(provider.results), 0)
+            self.assertEqual(final_manifest["status"], "review_pending")
+            self.assertEqual(
+                [state["status"] for state in final_manifest["page_processing"]],
+                ["ocr_succeeded", "ocr_succeeded", "ocr_succeeded"],
+            )
+
+    def test_nas_rerun_reuses_successes_from_failed_scratch_when_final_missing(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "nas_input"
+            output_root = root / "nas_output"
+            scratch_root = root / "local_scratch"
+            input_root.mkdir()
+            output_root.mkdir()
+            create_three_page_pdf(input_root / "doc.pdf")
+            config = nas_config(root, input_root, output_root, scratch_root)
+            repository = FileRepository()
+            provider = NasSequencedProvider(
+                [
+                    page_result(1, "page 1"),
+                    normalization_error_result(),
+                    page_result(3, "page 3"),
+                    page_result(2, "page 2"),
+                ]
+            )
+            orchestrator = PipelineOrchestrator(
+                config,
+                self.prompts,
+                EnvironmentSettings(),
+                DataPaths(output_root),
+                provider,
+                repository,
+            )
+
+            first_summary = orchestrator.run(dry_run=False)
+            self.assertEqual(first_summary["failed_documents"], 1)
+            self.assertTrue((scratch_root / "failed" / str(first_summary["run_id"])).exists())
+
+            repository.safe_remove_tree(output_root)
+            output_root.mkdir()
+
+            second_summary = orchestrator.run(dry_run=False)
+            data_paths = DataPaths(output_root)
+            final_manifest = repository.read_json(next(data_paths.manifests_dir.glob("*/manifest.json")))
+
+            self.assertEqual(second_summary["succeeded_documents"], 1)
+            self.assertEqual(second_summary["reused_ocr_pages"], 2)
+            self.assertEqual(provider.invocations, 4)
+            self.assertEqual(len(provider.results), 0)
+            self.assertEqual(final_manifest["status"], "review_pending")
+
     def test_nas_export_builds_in_scratch_and_publishes_manifest_last(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -313,6 +473,59 @@ class NasStorageModeTests(unittest.TestCase):
 
             self.assertEqual(second_summary["skipped_documents"], 1)
             self.assertEqual(provider.invocations, 1)
+
+    def test_nas_create_only_partial_page_failure_publishes_and_rerun_reuses_successes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_root = root / "nas_input"
+            output_root = root / "nas_output"
+            scratch_root = root / "local_scratch"
+            input_root.mkdir()
+            output_root.mkdir()
+            create_three_page_pdf(input_root / "doc.pdf")
+            config = nas_create_only_config(root, input_root, output_root, scratch_root)
+            repository = FileRepository()
+            provider = NasSequencedProvider(
+                [
+                    page_result(1, "page 1"),
+                    normalization_error_result(),
+                    page_result(3, "page 3"),
+                    page_result(2, "page 2"),
+                ]
+            )
+            orchestrator = PipelineOrchestrator(
+                config,
+                self.prompts,
+                EnvironmentSettings(),
+                DataPaths(output_root),
+                provider,
+                repository,
+            )
+
+            first_summary = orchestrator.run(dry_run=False)
+            data_paths = DataPaths(output_root)
+            first_marker = NasOutputIndex(data_paths, repository).latest_document_markers()[0]
+            document_id = first_marker.document_id
+
+            self.assertEqual(first_summary["failed_documents"], 1)
+            self.assertEqual(first_marker.manifest["status"], "failed")
+            self.assertTrue(first_marker.correction_path and first_marker.correction_path.exists())
+            self.assertEqual(len(list((data_paths.raw_responses_dir / document_id / str(first_summary["run_id"])).glob("*.json"))), 3)
+
+            second_summary = orchestrator.run(dry_run=False)
+            final_marker = NasOutputIndex(data_paths, repository).latest_document_marker(document_id)
+
+            self.assertIsNotNone(final_marker)
+            assert final_marker is not None
+            self.assertEqual(second_summary["succeeded_documents"], 1)
+            self.assertEqual(second_summary["reused_ocr_pages"], 2)
+            self.assertEqual(provider.invocations, 4)
+            self.assertEqual(len(provider.results), 0)
+            self.assertEqual(final_marker.manifest["status"], "review_pending")
+            self.assertEqual(
+                [state["status"] for state in final_marker.manifest["page_processing"]],
+                ["ocr_succeeded", "ocr_succeeded", "ocr_succeeded"],
+            )
 
     def test_nas_create_only_export_publishes_completed_export_marker(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -12,3 +12,5 @@ data/**
 extras/
 images/
 .env
+
+temp/nas_scratch 

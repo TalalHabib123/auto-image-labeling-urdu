@@ -20,7 +20,7 @@ from ncai_pipeline.parsing.validators import load_corrected_document
 from ncai_pipeline.pipeline.dry_run_manager import DryRunArtifactManager
 from ncai_pipeline.pipeline.orchestrator import PipelineOrchestrator
 from ncai_pipeline.providers.factory import build_provider
-from ncai_pipeline.schemas.common import ReviewStatus
+from ncai_pipeline.schemas.common import PageProcessingStatus, ReviewStatus
 from ncai_pipeline.schemas.review import ReviewRecord
 from ncai_pipeline.storage.locks import export_lock
 from ncai_pipeline.storage.nas import (
@@ -257,6 +257,17 @@ def _write_legacy_full_jsonl_aliases(
     legacy_manifest.stats.format_counts = {"jsonl": len(records)} # pyright: ignore[reportAttributeAccessIssue]
     repository.write_json(data_paths.export_target_dir / "export_manifest.json", legacy_manifest)  # type: ignore
 
+def _page_counts_from_manifest(manifest: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in manifest.get("page_processing", []) or []:
+        if not isinstance(item, dict):
+            continue
+        status = item.get("status")
+        if not status:
+            continue
+        counts[str(status)] = counts.get(str(status), 0) + 1
+    return counts
+
 def _format_document_entry(entry: dict[str, Any]) -> str:
     detail_parts = [
         entry["document_id"],
@@ -293,14 +304,24 @@ def _emit_run_summary(summary: dict[str, Any], data_paths: DataPaths) -> None:
         f"Performance: average_latency_ms={summary.get('average_latency_ms', 0)} "
         f"retry_count={summary.get('retry_count', 0)}"
     )
+    typer.echo(
+        "Page counts: "
+        f"ocr_succeeded={summary.get('ocr_succeeded_pages_total', summary.get('ocr_succeeded_pages', 0))} "
+        f"empty={summary.get('skipped_empty_pages_total', summary.get('skipped_empty_pages', 0))} "
+        f"needs_retry={summary.get('needs_retry_pages_total', summary.get('needs_retry_pages', 0))} "
+        f"failed={summary.get('failed_pages_total', summary.get('failed_pages', 0))} "
+        f"reused={summary.get('reused_ocr_pages', 0)}"
+    )
 
     retry_docs = summary.get("documents_needing_retry", [])
     typer.echo(f"Documents needing retry: {len(retry_docs)}")
+    typer.echo(f"Page retry entries: {len(retry_docs)}")
     for entry in retry_docs:
         typer.echo(f"- {_format_document_entry(entry)}")
 
     failed_docs = summary.get("documents_failed", [])
     typer.echo(f"Documents failed: {len(failed_docs)}")
+    typer.echo(f"Page failure entries: {len(failed_docs)}")
     for entry in failed_docs:
         typer.echo(f"- {_format_document_entry(entry)}")
 
@@ -325,6 +346,18 @@ def _emit_run_progress(update: dict[str, Any]) -> None:
             f"processing {update['document_id']}"
         )
         return
+    if event == "page":
+        parts = [
+            f"Page progress: {update['document_id']} {update['page_index']}/{update['total_pages']}",
+            f"page={update['page_number']}",
+            f"status={update['status']}",
+        ]
+        if update.get("error_category"):
+            parts.append(f"category={update['error_category']}")
+        if update.get("error_summary"):
+            parts.append(f"error={update['error_summary']}")
+        typer.echo(" | ".join(str(part) for part in parts))
+        return
     if event in {"skip", "completed"}:
         status = update.get("status", event)
         parts = [
@@ -332,6 +365,15 @@ def _emit_run_progress(update: dict[str, Any]) -> None:
             update["document_id"],
             f"status={status}",
         ]
+        page_counts = update.get("page_counts")
+        if isinstance(page_counts, dict):
+            parts.append(
+                "pages="
+                f"reviewable:{page_counts.get(PageProcessingStatus.OCR_SUCCEEDED.value, 0)} "
+                f"empty:{page_counts.get(PageProcessingStatus.SKIPPED_EMPTY.value, 0)} "
+                f"retry:{page_counts.get(PageProcessingStatus.NEEDS_RETRY.value, 0)} "
+                f"failed:{page_counts.get(PageProcessingStatus.FAILED.value, 0)}"
+            )
         if update.get("error_summary"):
             parts.append(f"error={update['error_summary']}")
         typer.echo(" | ".join(parts))
@@ -340,17 +382,24 @@ def _emit_run_progress(update: dict[str, Any]) -> None:
 def _emit_export_progress(update: dict[str, Any]) -> None:
     event = update["event"]
     if event == "start":
-        typer.echo(f"Export progress: 0/{update['total_records']} review records scanned | included=0")
+        typer.echo(f"Export progress: 0/{update['total_records']} review records scanned | included=0 | included_pages=0")
         return
     if event == "record":
         parts = [
             f"Export progress: {update['completed_records']}/{update['total_records']}",
             update["document_id"],
             f"outcome={update['outcome']}",
-            f"included={update['included_samples']}",
+            f"included_pages={update.get('included_pages', update.get('included_samples', 0))}",
         ]
+        if update.get("record_included_pages") is not None:
+            parts.append(f"record_pages={update['record_included_pages']}")
         if update.get("split"):
             parts.append(f"split={update['split']}")
+        skipped_counts = update.get("skipped_counts")
+        if isinstance(skipped_counts, dict) and skipped_counts:
+            compact = ",".join(f"{key}:{value}" for key, value in sorted(skipped_counts.items()) if value)
+            if compact:
+                parts.append(f"skipped={compact}")
         typer.echo(" | ".join(parts))
 
 
@@ -444,6 +493,15 @@ def pipeline_status(
     typer.echo(f"Matching documents: {len(filtered)}")
     for manifest in filtered:
         details = [manifest["document_id"], manifest["status"], manifest["source_path"]]
+        page_counts = _page_counts_from_manifest(manifest)
+        if page_counts:
+            details.append(
+                "pages="
+                f"reviewable:{page_counts.get(PageProcessingStatus.OCR_SUCCEEDED.value, 0)} "
+                f"empty:{page_counts.get(PageProcessingStatus.SKIPPED_EMPTY.value, 0)} "
+                f"retry:{page_counts.get(PageProcessingStatus.NEEDS_RETRY.value, 0)} "
+                f"failed:{page_counts.get(PageProcessingStatus.FAILED.value, 0)}"
+            )
         if manifest.get("error_details"):
             details.append(f"error={manifest['error_details']}")
         typer.echo(f"- {' | '.join(details)}")
@@ -501,7 +559,7 @@ def export(
     region_source: Annotated[str | None, typer.Option("--region-source", help="Region source for --dataset-type regions: blocks or sections")] = None,
 ) -> None:
     config, data_paths, repository = _load_runtime(config_path)
-    sample_count, _, _ = _write_exports(
+    sample_count, _, manifest = _write_exports(
         config,
         data_paths,
         repository,
@@ -517,12 +575,16 @@ def export(
             manifest_path = str(marker.get("export_manifest_path") or "")
             export_folder = Path(manifest_path).parent if manifest_path else data_paths.exports_dir / "runs"
             typer.echo(f"Exported {sample_count} approved sample(s)")
+            typer.echo(f"Exported {sample_count} verified page sample(s)")
+            typer.echo(f"Export skipped counts: {manifest.stats.skipped_counts}") #type: ignore
             typer.echo(f"Export run: {marker.get('run_id')}")
             typer.echo(f"Export folder: {export_folder}")
             typer.echo(f"Export manifest: {manifest_path}")
             typer.echo("Dataset media paths are relative to the export folder.")
             return
     typer.echo(f"Exported {sample_count} approved sample(s) to {data_paths.export_datasets_dir}")
+    typer.echo(f"Exported {sample_count} verified page sample(s) to {data_paths.export_datasets_dir}")
+    typer.echo(f"Export skipped counts: {manifest.stats.skipped_counts}") #type: ignore
 
 
 @app.command("dry-run-artifacts")

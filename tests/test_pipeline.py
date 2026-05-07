@@ -14,11 +14,12 @@ import yaml
 
 sys.path.insert(0, str((Path(__file__).resolve().parents[1] / "src").resolve()))
 
-from PIL import Image
+from PIL import Image, ImageDraw
 from typer.testing import CliRunner
 
 from ncai_pipeline.cli import app
-from ncai_pipeline.config import AppConfig, EnvironmentSettings, PromptRegistry
+from ncai_pipeline.config import AppConfig, BlankPageDetectionSettings, EnvironmentSettings, PromptRegistry
+from ncai_pipeline.ingestion.blank_detector import detect_blank_page
 from ncai_pipeline.parsing.normalizer import normalize_provider_payload
 from ncai_pipeline.pipeline.orchestrator import PipelineOrchestrator
 from ncai_pipeline.providers.base import (
@@ -43,6 +44,16 @@ def create_multi_page_pdf(path: Path) -> None:
     first = Image.new("RGB", (64, 64), color="white")
     second = Image.new("RGB", (64, 64), color="gray")
     first.save(path, format="PDF", save_all=True, append_images=[second])
+
+
+def create_three_page_pdf(path: Path) -> None:
+    pages = []
+    for index in range(3):
+        image = Image.new("RGB", (96, 96), color="white")
+        draw = ImageDraw.Draw(image)
+        draw.rectangle((10, 18 + index * 8, 82, 34 + index * 8), fill="black")
+        pages.append(image)
+    pages[0].save(path, format="PDF", save_all=True, append_images=pages[1:])
 
 
 def reset_logging() -> None:
@@ -315,6 +326,27 @@ class PipelineTests(unittest.TestCase):
             correction_files = list((data_paths.correction_files_dir).glob("*/corrected.yaml"))
             self.assertEqual(len(correction_files), 1)
 
+    def test_blank_page_detector_is_conservative(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            settings = BlankPageDetectionSettings(min_pixels=1)
+            blank = root / "blank.png"
+            noisy = root / "noisy.png"
+            marked = root / "marked.png"
+            Image.new("RGB", (300, 300), color="white").save(blank)
+            noisy_image = Image.new("RGB", (300, 300), color=(252, 252, 252))
+            draw = ImageDraw.Draw(noisy_image)
+            draw.point([(10, 10), (100, 120), (240, 70)], fill=(235, 235, 235))
+            noisy_image.save(noisy)
+            marked_image = Image.new("RGB", (300, 300), color="white")
+            draw = ImageDraw.Draw(marked_image)
+            draw.rectangle((40, 80, 240, 120), fill="black")
+            marked_image.save(marked)
+
+            self.assertTrue(detect_blank_page(blank, settings).is_blank)
+            self.assertTrue(detect_blank_page(noisy, settings).is_blank)
+            self.assertFalse(detect_blank_page(marked, settings).is_blank)
+
     def test_document_mode_is_supported(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -415,6 +447,118 @@ class PipelineTests(unittest.TestCase):
             raw_responses = list(data_paths.raw_responses_dir.glob("**/*.json"))
             self.assertGreaterEqual(len(raw_responses), 2)
 
+    def test_page_retry_rerun_only_invokes_failed_page_and_preserves_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            create_multi_page_pdf(input_dir / "fixture.pdf")
+            config = build_config(root, input_dir, process_mode="per_page")
+            data_paths = DataPaths(Path(config.pipeline.output_root))
+            page_1 = '{"page_number": 1, "language": "ur", "full_text": "page 1", "structured_content": {"language": "ur"}, "blocks": [], "lines": [], "tables": [], "warnings": [], "confidence_notes": []}'
+            page_2 = '{"page_number": 2, "language": "ur", "full_text": "page 2", "structured_content": {"language": "ur"}, "blocks": [], "lines": [], "tables": [], "warnings": [], "confidence_notes": []}'
+            provider = SequencedProvider(
+                [
+                    ProviderInvocationResult(status="succeeded", raw_response_text=page_1, latency_ms=5),
+                    ProviderInvocationResult(
+                        status="failed",
+                        error_details="HTTP 429 | rate limited",
+                        error_category="rate_limited",
+                        http_status_code=429,
+                        attempt_count=2,
+                        retry_count=1,
+                    ),
+                    ProviderInvocationResult(status="succeeded", raw_response_text=page_2, latency_ms=5),
+                ]
+            )
+            orchestrator = PipelineOrchestrator(config, self.prompts, self.environment, data_paths, provider, FileRepository())
+
+            first_summary = orchestrator.run()
+            second_summary = orchestrator.run()
+
+            self.assertEqual(first_summary["needs_retry_documents"], 1)
+            self.assertEqual(second_summary["succeeded_documents"], 1)
+            self.assertEqual(second_summary["reused_ocr_pages"], 1)
+            self.assertEqual(len(provider.results), 0)
+            corrected_path = next(data_paths.correction_files_dir.glob("*/corrected.yaml"))
+            corrected = yaml.safe_load(corrected_path.read_text(encoding="utf-8"))
+            self.assertEqual([page["full_text"] for page in corrected["extracted_pages"]], ["page 1", "page 2"])
+            manifest = FileRepository().read_json(next(data_paths.manifests_dir.glob("*/manifest.json")))
+            self.assertEqual(manifest["status"], "review_pending")
+            self.assertEqual(
+                [state["status"] for state in manifest["page_processing"]],
+                ["ocr_succeeded", "ocr_succeeded"],
+            )
+
+    def test_normalization_failure_is_page_local_and_rerun_reuses_successes(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            create_three_page_pdf(input_dir / "fixture.pdf")
+            config = build_config(root, input_dir, process_mode="per_page")
+            data_paths = DataPaths(Path(config.pipeline.output_root))
+
+            def page_payload(page_number: int, text: str) -> str:
+                return json.dumps(
+                    {
+                        "page_number": page_number,
+                        "language": "ur",
+                        "full_text": text,
+                        "structured_content": {"language": "ur"},
+                        "blocks": [],
+                        "lines": [],
+                        "tables": [],
+                        "warnings": [],
+                        "confidence_notes": [],
+                    }
+                )
+
+            bad_payload = json.dumps(
+                {
+                    "page_number": 2,
+                    "language": "ur",
+                    "full_text": "bad page",
+                    "structured_content": {"language": "ur"},
+                    "blocks": [{"block_id": "b1", "text": "bad page", "handwritten_auto": {"not": "a bool"}}],
+                    "lines": [],
+                    "tables": [],
+                    "warnings": [],
+                    "confidence_notes": [],
+                }
+            )
+            provider = SequencedProvider(
+                [
+                    ProviderInvocationResult(status="succeeded", raw_response_text=page_payload(1, "page 1"), latency_ms=5),
+                    ProviderInvocationResult(status="succeeded", raw_response_text=bad_payload, latency_ms=5),
+                    ProviderInvocationResult(status="succeeded", raw_response_text=page_payload(3, "page 3"), latency_ms=5),
+                    ProviderInvocationResult(status="succeeded", raw_response_text=page_payload(2, "page 2"), latency_ms=5),
+                ]
+            )
+            orchestrator = PipelineOrchestrator(config, self.prompts, self.environment, data_paths, provider, FileRepository())
+
+            first_summary = orchestrator.run()
+            first_manifest = FileRepository().read_json(next(data_paths.manifests_dir.glob("*/manifest.json")))
+
+            self.assertEqual(first_manifest["status"], "failed")
+            self.assertEqual(first_summary["failed_documents"], 1)
+            self.assertEqual(first_summary["failed_pages_total"], 1)
+            self.assertEqual(
+                [state["status"] for state in first_manifest["page_processing"]],
+                ["ocr_succeeded", "failed", "ocr_succeeded"],
+            )
+            self.assertEqual(first_manifest["page_processing"][1]["error_category"], "normalization_error")
+
+            second_summary = orchestrator.run()
+            corrected = yaml.safe_load(next(data_paths.correction_files_dir.glob("*/corrected.yaml")).read_text(encoding="utf-8"))
+            final_manifest = FileRepository().read_json(next(data_paths.manifests_dir.glob("*/manifest.json")))
+
+            self.assertEqual(second_summary["succeeded_documents"], 1)
+            self.assertEqual(second_summary["reused_ocr_pages"], 2)
+            self.assertEqual(len(provider.results), 0)
+            self.assertEqual(final_manifest["status"], "review_pending")
+            self.assertEqual([page["full_text"] for page in corrected["extracted_pages"]], ["page 1", "page 2", "page 3"])
+
     def test_orchestrator_records_failed_document_for_non_retryable_error(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
@@ -438,6 +582,32 @@ class PipelineTests(unittest.TestCase):
 
             self.assertEqual(summary["failed_documents"], 1)
             self.assertEqual(len(summary["documents_failed"]), 1)
+
+    def test_nonblank_no_parseable_placeholder_is_marked_for_retry_not_export_review(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            input_dir = root / "input"
+            input_dir.mkdir()
+            image = Image.new("RGB", (300, 300), color="white")
+            ImageDraw.Draw(image).rectangle((20, 40, 260, 90), fill="black")
+            image.save(input_dir / "doc.png")
+            config = build_config(root, input_dir)
+            data_paths = DataPaths(Path(config.pipeline.output_root))
+            placeholder = (
+                '{"page_number": 1, "language": null, "full_text": "", "structured_content": {}, '
+                '"blocks": [], "lines": [], "tables": [], '
+                '"warnings": ["No parseable content returned by provider."], "confidence_notes": []}'
+            )
+            provider = SequencedProvider([ProviderInvocationResult(status="succeeded", raw_response_text=placeholder, latency_ms=5)])
+            orchestrator = PipelineOrchestrator(config, self.prompts, self.environment, data_paths, provider, FileRepository())
+
+            summary = orchestrator.run()
+
+            self.assertEqual(summary["needs_retry_documents"], 1)
+            corrected = yaml.safe_load(next(data_paths.correction_files_dir.glob("*/corrected.yaml")).read_text(encoding="utf-8"))
+            self.assertEqual(corrected["extracted_pages"], [])
+            self.assertEqual(corrected["page_processing"][0]["status"], "needs_retry")
+            self.assertEqual(corrected["page_processing"][0]["error_category"], "empty_ocr_result")
 
     def test_gemini_429_with_retry_after_uses_wait_budget_and_captures_diagnostics(self) -> None:
         config = build_config(Path("."), Path("data/input"))
@@ -581,6 +751,27 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(normalized.blocks[0].bbox.top, 10.0)
         self.assertEqual(normalized.blocks[0].bbox.right, 120.0)
         self.assertEqual(normalized.blocks[0].bbox.bottom, 50.0)
+
+    def test_normalizer_accepts_language_lists(self) -> None:
+        normalized = normalize_provider_payload(
+            "doc-1",
+            1,
+            {
+                "page_number": 1,
+                "language": ["Urdu", "English"],
+                "full_text": "page 1",
+                "structured_content": {"language": ["Urdu", "English"]},
+                "blocks": [],
+                "lines": [],
+                "tables": [],
+                "warnings": "Recovered",
+                "confidence_notes": "Mixed language",
+            },
+        )
+
+        self.assertEqual(normalized.language, "Urdu, English")
+        self.assertEqual(normalized.warnings, ["Recovered"])
+        self.assertEqual(normalized.confidence_notes, ["Mixed language"])
 
     def test_valid_list_payload_does_not_emit_no_parseable_warning(self) -> None:
         provider = GeminiProvider(

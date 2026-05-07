@@ -5,7 +5,7 @@ from pathlib import Path
 from ncai_pipeline.config import ReviewSettings
 from ncai_pipeline.pipeline.stages import consolidate_text
 from ncai_pipeline.review.html_report import render_review_report
-from ncai_pipeline.schemas.common import ApprovalMetadata
+from ncai_pipeline.schemas.common import ApprovalMetadata, PageProcessingState, ReviewStatus
 from ncai_pipeline.schemas.document import PageArtifact
 from ncai_pipeline.schemas.extraction import NormalizedExtraction, RawExtractionRecord
 from ncai_pipeline.schemas.review import CorrectedDocument, PageReviewState, ReviewRecord
@@ -28,23 +28,51 @@ class ReviewArtifactBuilder:
         pipeline_version: str,
         raw_output_path: Path,
         is_dry_run: bool,
+        page_processing: list[PageProcessingState] | None = None,
+        prior_corrected: CorrectedDocument | None = None,
+        reset_review_pages: set[int] | None = None,
     ) -> ReviewRecord:
         correction_path = self.correction_dir / document_id / "corrected.yaml"
         consolidated_text = consolidate_text(extractions)
         notes = ["Generated from dry-run placeholder output. Do not include in production exports."] if is_dry_run else []
-        corrected = CorrectedDocument(
-            document_id=document_id,
-            approval_metadata=ApprovalMetadata(
+        reset_review_pages = reset_review_pages or set()
+        prior_reviews = {
+            review.page_number: review
+            for review in (prior_corrected.page_reviews if prior_corrected is not None else [])
+        }
+        page_reviews = []
+        for index, page in enumerate(extractions, start=1):
+            page_number = page.page_number or index
+            existing_review = prior_reviews.get(page_number)
+            if existing_review is not None and page_number not in reset_review_pages:
+                page_reviews.append(existing_review)
+            else:
+                page_reviews.append(PageReviewState(page_number=page_number))
+
+        approval_metadata = (
+            prior_corrected.approval_metadata.model_copy(deep=True)
+            if prior_corrected is not None
+            else ApprovalMetadata(
                 source_version=pipeline_version,
                 is_dry_run=is_dry_run,
                 retention_label="temporary" if is_dry_run else None,
                 notes=notes,
-            ),
+            )
+        )
+        approval_metadata.source_version = approval_metadata.source_version or pipeline_version
+        approval_metadata.is_dry_run = is_dry_run
+        approval_metadata.retention_label = "temporary" if is_dry_run else approval_metadata.retention_label
+        if notes:
+            approval_metadata.notes = list({*approval_metadata.notes, *notes})
+        if reset_review_pages and approval_metadata.review_status == ReviewStatus.APPROVED:
+            approval_metadata.review_status = ReviewStatus.IN_REVIEW
+
+        corrected = CorrectedDocument(
+            document_id=document_id,
+            approval_metadata=approval_metadata,
             extracted_pages=extractions,
-            page_reviews=[
-                PageReviewState(page_number=page.page_number or index)
-                for index, page in enumerate(extractions, start=1)
-            ],
+            page_reviews=page_reviews,
+            page_processing=page_processing or [],
             consolidated_text=consolidated_text,
             target_output={
                 "document_id": document_id,

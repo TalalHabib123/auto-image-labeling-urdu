@@ -33,6 +33,14 @@ class ScopeType(str, Enum):
     DOCUMENT = "document"
 
 
+class PageProcessingStatus(str, Enum):
+    PENDING = "pending"
+    OCR_SUCCEEDED = "ocr_succeeded"
+    SKIPPED_EMPTY = "skipped_empty"
+    NEEDS_RETRY = "needs_retry"
+    FAILED = "failed"
+
+
 class BaseSchemaModel(BaseModel):
     model_config = ConfigDict(extra="allow", populate_by_name=True)
 
@@ -62,3 +70,21 @@ class ApprovalMetadata(BaseSchemaModel):
     is_dry_run: bool = False
     retention_label: str | None = None
     notes: list[str] = Field(default_factory=list)
+
+
+class PageProcessingState(BaseSchemaModel):
+    page_number: int
+    status: PageProcessingStatus = PageProcessingStatus.PENDING
+    image_path: str | None = None
+    width: int | None = None
+    height: int | None = None
+    blank_detection: dict[str, Any] = Field(default_factory=dict)
+    error_summary: str | None = None
+    error_category: str | None = None
+    http_status_code: int | None = None
+    attempt_count: int | None = None
+    retry_after_seconds: float | None = None
+    raw_response_path: str | None = None
+    parsed_path: str | None = None
+    processed_at: datetime | None = None
+    updated_at: datetime | None = None

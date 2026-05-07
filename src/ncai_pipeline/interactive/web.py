@@ -190,7 +190,17 @@ DASHBOARD_TEMPLATE = TEMPLATE_ENV.from_string(
             </td>
             <td><span class="pill pipeline-{{ item.pipeline_status }}">{{ item.pipeline_status }}</span></td>
             <td><span class="pill review-{{ item.review_status }}">{{ item.review_status }}</span></td>
-            <td>{{ item.page_count }}</td>
+            <td>
+              {{ item.page_count }}
+              {% if item.page_status_counts %}
+              <div class="meta">
+                <span class="pill page-verified">{{ item.page_status_counts.get("reviewable", 0) }} reviewable</span>
+                {% if item.page_status_counts.get("skipped_empty", 0) %}<span class="pill review-pending">{{ item.page_status_counts.get("skipped_empty", 0) }} empty</span>{% endif %}
+                {% if item.page_status_counts.get("needs_retry", 0) %}<span class="pill review-needs_retry">{{ item.page_status_counts.get("needs_retry", 0) }} retry</span>{% endif %}
+                {% if item.page_status_counts.get("failed", 0) %}<span class="pill pipeline-failed">{{ item.page_status_counts.get("failed", 0) }} failed</span>{% endif %}
+              </div>
+              {% endif %}
+            </td>
             <td>{{ item.source_path }}</td>
             <td>
               {% if item.has_review_bundle %}
@@ -350,7 +360,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
       top: 0;
       z-index: 20;
       display: grid;
-      grid-template-columns: repeat(6, minmax(0, 1fr));
+      grid-template-columns: repeat(7, minmax(0, 1fr));
       gap: 12px;
       margin: 0 10px 18px;
       padding: 14px;
@@ -1166,6 +1176,10 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
         <span class="rail-value">{{ context.selected_page_number }} / {{ context.queue_entry.page_count }}</span>
       </div>
       <div class="rail-item">
+        <span class="rail-label">Page States</span>
+        <span class="rail-value">{{ page_status_counts.get("reviewable", 0) }} reviewable · {{ page_status_counts.get("skipped_empty", 0) }} empty · {{ page_status_counts.get("needs_retry", 0) }} retry · {{ page_status_counts.get("failed", 0) }} failed</span>
+      </div>
+      <div class="rail-item">
         <span class="rail-label">Workspace</span>
         <span class="rail-value workspace-summary">{{ page_workspace.mode }} - {{ page_workspace.fragments|length }} fields - {{ page_workspace.handwritten_count }} handwritten</span>
         <span class="rail-value">{{ page_workspace.mode }} · {{ page_workspace.fragments|length }} fields</span>
@@ -1204,6 +1218,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
             </div>
             <div class="page-link-meta">
               <span class="meta-text">{{ item.fragment_count }} {{ item.fragment_mode }}</span>
+              <span class="meta-text">{{ item.processing_status }}</span>
               <span class="meta-text">{{ item.handwritten_count }} handwritten</span>
               <span class="meta-text">{% if item.warning_count %}{{ item.warning_count }} system alerts{% else %}clear{% endif %}</span>
             </div>
@@ -1546,7 +1561,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
           <div class="review-readiness">
             <span class="pill page-{{ context.page_review.status.value }}">{{ "success" if context.page_review.status.value == "verified" else context.page_review.status.value|replace("_", " ") }}</span>
             <span class="pill review-{{ context.corrected.approval_metadata.review_status.value }}">{{ context.corrected.approval_metadata.review_status.value }}</span>
-            <span class="readiness-note">{% if all_pages_verified %}All pages are verified. The document is ready to approve.{% else %}Approve unlocks once every page is marked as success.{% endif %}</span>
+            <span class="readiness-note">{% if all_pages_verified %}All reviewable pages are verified and no OCR pages are blocked.{% else %}Approve unlocks when every reviewable page is success and retry/failed pages are cleared by a rerun.{% endif %}</span>
           </div>
         </div>
         <div class="settings-grid">
@@ -1617,7 +1632,7 @@ DOCUMENT_TEMPLATE = TEMPLATE_ENV.from_string(
             <button type="submit" name="status" value="rejected" class="button-danger">Reject</button>
           </div>
           {% if not all_pages_verified %}
-          <p class="drawer-copy">Approval stays locked until every page status is set to success.</p>
+          <p class="drawer-copy">Approval stays locked until every reviewable page is success and retry/failed pages are cleared by a rerun.</p>
           {% endif %}
         </form>
       </section>
@@ -2413,6 +2428,7 @@ class InteractiveWebController:
         html = DOCUMENT_TEMPLATE.render(
             context=context,
             page_summaries=context.page_summaries,
+            page_status_counts=context.page_status_counts,
             page_workspace=context.selected_page_workspace,
             preview_mode=preview_mode,
             notices=notices,

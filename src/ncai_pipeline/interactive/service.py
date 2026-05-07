@@ -14,14 +14,14 @@ from PIL import Image
 
 from ncai_pipeline.config import EnvironmentSettings, ProviderSettings
 from ncai_pipeline.parsing.normalizer import normalize_provider_payload
-from ncai_pipeline.parsing.validators import ensure_page_reviews, load_corrected_document
+from ncai_pipeline.parsing.validators import ensure_page_processing, ensure_page_reviews, load_corrected_document
 from ncai_pipeline.pipeline.stages import consolidate_text
 from ncai_pipeline.providers.base import ExtractionProvider
 from ncai_pipeline.providers.gemini_provider import GeminiProvider
 from ncai_pipeline.review.html_report import render_review_report
 from ncai_pipeline.review.dry_run_policy import corrected_document_is_dry_run
 from ncai_pipeline.review.handwriting import block_handwriting_status
-from ncai_pipeline.schemas.common import BoundingBox, PipelineStatus, ReviewStatus
+from ncai_pipeline.schemas.common import BoundingBox, PageProcessingStatus, PipelineStatus, ReviewStatus
 from ncai_pipeline.schemas.document import DocumentManifest
 from ncai_pipeline.schemas.extraction import NormalizedExtraction, RawExtractionRecord
 from ncai_pipeline.schemas.review import (
@@ -51,6 +51,7 @@ class QueueDocument:
     correction_path: str | None = None
     report_path: str | None = None
     error_details: str | None = None
+    page_status_counts: dict[str, int] | None = None
 
 
 @dataclass
@@ -88,6 +89,7 @@ class PageWorkspace:
 class PageSummary:
     page_number: int
     review_status: str
+    processing_status: str
     warning_count: int
     fragment_count: int
     fragment_mode: str
@@ -113,6 +115,7 @@ class DocumentContext:
     selected_page_workspace: PageWorkspace
     selected_raw_workspace: PageWorkspace
     page_summaries: list[PageSummary]
+    page_status_counts: dict[str, int]
     auto_heal_note: str | None
     latest_run_summary: dict[str, Any] | None
     latest_export_summary: dict[str, Any] | None
@@ -249,17 +252,22 @@ class InteractiveReviewService:
             report_path: str | None = None
             review_record_path: str | None = None
             effective_review_status = "pending"
+            has_review_pages = False
             if review_record is not None:
                 review_record_path = str(self.data_paths.status_dir / document_id / "review_record.json")
                 correction_path = review_record.corrected_output_path
                 report_path = review_record.report_path
                 effective_review_status = review_record.review_status.value
                 corrected = load_corrected_document(Path(review_record.corrected_output_path), self.repository)
+                has_review_pages = bool(corrected.extracted_pages)
                 is_dry_run = corrected_document_is_dry_run(corrected)
                 effective_review_status = corrected.approval_metadata.review_status.value
+                page_status_counts = self.page_processing_counts(corrected)
                 if self._create_only_nas:
                     manifest = dict(manifest)
                     manifest["status"] = self._pipeline_status_from_review(corrected).value
+            else:
+                page_status_counts = self._page_status_counts_from_manifest(manifest)
 
             if pipeline_status != "all" and manifest["status"] != pipeline_status:
                 continue
@@ -275,13 +283,14 @@ class InteractiveReviewService:
                     pipeline_status=manifest["status"],
                     review_status=effective_review_status,
                     page_count=manifest.get("page_count") or 0,
-                    has_review_bundle=review_record is not None,
+                    has_review_bundle=review_record is not None and has_review_pages,
                     is_dry_run=is_dry_run,
                     manifest_path=str(path),
                     review_record_path=review_record_path,
                     correction_path=correction_path,
                     report_path=report_path,
                     error_details=manifest.get("error_details"),
+                    page_status_counts=page_status_counts,
                 )
             )
         return queue
@@ -314,6 +323,7 @@ class InteractiveReviewService:
             manifest_payload=manifest,
         )
         manifest = manifest_model.model_dump(mode="json")
+        page_status_counts = self.page_processing_counts(corrected)
 
         queue_entry = QueueDocument(
             document_id=document_id,
@@ -328,6 +338,7 @@ class InteractiveReviewService:
             correction_path=review_record.corrected_output_path,
             report_path=review_record.report_path,
             error_details=manifest.get("error_details"),
+            page_status_counts=page_status_counts,
         )
         selected_page_index = self._resolve_page_index(corrected, page_number)
         selected_page = corrected.extracted_pages[selected_page_index]
@@ -340,6 +351,7 @@ class InteractiveReviewService:
 
         page_summaries: list[PageSummary] = []
         reviews_by_page = self._page_review_by_number(corrected)
+        processing_by_page = self._page_processing_by_number(corrected)
         for index, page in enumerate(corrected.extracted_pages, start=1):
             effective_page_number = page.page_number or index
             page_workspace = self.build_page_workspace(page)
@@ -347,6 +359,7 @@ class InteractiveReviewService:
                 PageSummary(
                     page_number=effective_page_number,
                     review_status=reviews_by_page[effective_page_number].status.value,
+                    processing_status=processing_by_page.get(effective_page_number, PageProcessingStatus.OCR_SUCCEEDED.value),
                     warning_count=len(self.filter_display_warnings(page.warnings)),
                     fragment_count=len(page_workspace.fragments),
                     fragment_mode=page_workspace.mode,
@@ -376,6 +389,7 @@ class InteractiveReviewService:
             selected_page_workspace=self.build_page_workspace(selected_page),
             selected_raw_workspace=self.build_page_workspace(selected_raw_page),
             page_summaries=page_summaries,
+            page_status_counts=page_status_counts,
             auto_heal_note=auto_heal_note,
             latest_run_summary=self.load_latest_run_summary(),
             latest_export_summary=self.load_latest_export_summary(),
@@ -580,6 +594,14 @@ class InteractiveReviewService:
     ) -> None:
         corrected, review_record = self._load_corrected_bundle(document_id)
         if status == ReviewStatus.APPROVED:
+            blocking_states = [
+                state
+                for state in ensure_page_processing(corrected).page_processing
+                if state.status in {PageProcessingStatus.NEEDS_RETRY, PageProcessingStatus.FAILED, PageProcessingStatus.PENDING}
+            ]
+            if blocking_states:
+                pages = ", ".join(str(state.page_number) for state in blocking_states)
+                raise ValueError(f"Cannot approve while pages need OCR retry or failed processing: {pages}.")
             if require_verified_pages and not self.all_pages_verified(corrected):
                 raise ValueError("All pages must be verified before approving the document.")
             if auto_verify_pages_on_approve:
@@ -601,10 +623,33 @@ class InteractiveReviewService:
         self._sync_manifest_review_state(document_id, corrected)
 
     def all_pages_verified(self, corrected: CorrectedDocument) -> bool:
-        corrected = ensure_page_reviews(corrected)
-        if not corrected.page_reviews:
+        corrected = ensure_page_processing(ensure_page_reviews(corrected))
+        processing_by_page = self._page_processing_state_by_number(corrected)
+        if any(
+            state.status in {PageProcessingStatus.NEEDS_RETRY, PageProcessingStatus.FAILED, PageProcessingStatus.PENDING}
+            for state in processing_by_page.values()
+        ):
             return False
-        return all(item.status == PageVerificationStatus.VERIFIED for item in corrected.page_reviews)
+        reviewable_pages = {
+            state.page_number
+            for state in processing_by_page.values()
+            if state.status == PageProcessingStatus.OCR_SUCCEEDED
+        }
+        if not reviewable_pages:
+            return False
+        reviews_by_page = self._page_review_by_number(corrected)
+        return all(
+            reviews_by_page.get(page_number) is not None
+            and reviews_by_page[page_number].status == PageVerificationStatus.VERIFIED
+            for page_number in reviewable_pages
+        )
+
+    def page_processing_counts(self, corrected: CorrectedDocument) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for state in self._page_processing_state_by_number(corrected).values():
+            counts[state.status.value] = counts.get(state.status.value, 0) + 1
+        counts["reviewable"] = counts.get(PageProcessingStatus.OCR_SUCCEEDED.value, 0)
+        return counts
 
     def build_page_workspace(self, page: NormalizedExtraction) -> PageWorkspace:
         fragments: list[PageFragment] = []
@@ -813,6 +858,26 @@ class InteractiveReviewService:
         ensure_page_reviews(corrected)
         return {review.page_number: review for review in corrected.page_reviews}
 
+    def _page_processing_state_by_number(self, corrected: CorrectedDocument) -> dict[int, Any]:
+        ensure_page_processing(corrected)
+        return {state.page_number: state for state in corrected.page_processing}
+
+    def _page_processing_by_number(self, corrected: CorrectedDocument) -> dict[int, str]:
+        return {
+            page_number: state.status.value
+            for page_number, state in self._page_processing_state_by_number(corrected).items()
+        }
+
+    def _page_status_counts_from_manifest(self, manifest: dict[str, Any]) -> dict[str, int]:
+        counts: dict[str, int] = {}
+        for item in manifest.get("page_processing", []) or []:
+            status = item.get("status") if isinstance(item, dict) else None
+            if not status:
+                continue
+            counts[str(status)] = counts.get(str(status), 0) + 1
+        counts["reviewable"] = counts.get(PageProcessingStatus.OCR_SUCCEEDED.value, 0)
+        return counts
+
     def _sync_target_output(self, corrected: CorrectedDocument) -> None:
         corrected.target_output.setdefault("document_id", corrected.document_id)
         corrected.target_output["pages"] = [page.model_dump(mode="json") for page in corrected.extracted_pages]
@@ -913,8 +978,8 @@ class InteractiveReviewService:
         correction_path: Path,
     ) -> str:
         page_image_paths = [
-            Path(self.page_image_path(corrected.document_id, page.page_number or index))
-            for index, page in enumerate(corrected.extracted_pages, start=1)
+            Path(self.page_image_path(corrected.document_id, page_number))
+            for page_number in range(1, self._max_page_number(corrected) + 1)
         ]
         return render_review_report(
             title=self.report_title,
@@ -925,6 +990,14 @@ class InteractiveReviewService:
             corrected=corrected,
             correction_path=correction_path,
         )
+
+    def _max_page_number(self, corrected: CorrectedDocument) -> int:
+        page_numbers = [
+            page.page_number or index
+            for index, page in enumerate(corrected.extracted_pages, start=1)
+        ]
+        page_numbers.extend(state.page_number for state in ensure_page_processing(corrected).page_processing)
+        return max(page_numbers or [0])
 
     def _sync_manifest_review_state(
         self,
@@ -962,10 +1035,17 @@ class InteractiveReviewService:
 
     def _pipeline_status_from_review(self, corrected: CorrectedDocument) -> PipelineStatus:
         review_status = corrected.approval_metadata.review_status
-        if review_status == ReviewStatus.APPROVED:
-            return PipelineStatus.APPROVED
         if review_status == ReviewStatus.REJECTED:
             return PipelineStatus.REJECTED
+        page_statuses = {state.status for state in ensure_page_processing(corrected).page_processing}
+        if PageProcessingStatus.NEEDS_RETRY in page_statuses:
+            return PipelineStatus.NEEDS_RETRY
+        if PageProcessingStatus.FAILED in page_statuses:
+            return PipelineStatus.FAILED
+        if page_statuses and page_statuses == {PageProcessingStatus.SKIPPED_EMPTY}:
+            return PipelineStatus.SKIPPED
+        if review_status == ReviewStatus.APPROVED:
+            return PipelineStatus.APPROVED
         if review_status == ReviewStatus.NEEDS_RETRY:
             return PipelineStatus.NEEDS_RETRY
         if review_status == ReviewStatus.IN_REVIEW:
@@ -1015,6 +1095,12 @@ class InteractiveReviewService:
             if recovered is None or self._page_is_parse_placeholder(recovered):
                 continue
             corrected.extracted_pages[index - 1] = recovered
+            processing_state = self._page_processing_state_by_number(corrected).get(page_number)
+            if processing_state is not None:
+                processing_state.status = PageProcessingStatus.OCR_SUCCEEDED
+                processing_state.error_summary = None
+                processing_state.error_category = None
+                processing_state.updated_at = utc_now()
             self._save_parsed_page(recovered)
             healed_pages.append(page_number)
             updated = True

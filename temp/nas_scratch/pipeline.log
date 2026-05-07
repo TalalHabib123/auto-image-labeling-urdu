@@ -1,0 +1,45 @@
+2026-05-07 11:17:11,664 | ERROR | ncai_pipeline.pipeline.orchestrator | NAS document processing failed for b4u_new_complaints_bundle_1_dated_17122025_7bdf1c2c7686a121
+Traceback (most recent call last):
+  File "E:\NCAI\src\ncai_pipeline\pipeline\orchestrator.py", line 440, in _run_nas
+    processed_manifest = self._process_document(
+                         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\NCAI\src\ncai_pipeline\pipeline\orchestrator.py", line 630, in _process_document
+    raw_records, normalized_records, page_processing, reset_review_pages = self._process_page_scope(
+                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\NCAI\src\ncai_pipeline\pipeline\orchestrator.py", line 1153, in _process_page_scope
+    normalized = normalize_provider_payload(manifest.document_id, page.page_number, parsed_payload)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\NCAI\src\ncai_pipeline\parsing\normalizer.py", line 79, in normalize_provider_payload
+    return NormalizedExtraction(
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "E:\NCAI\.venv\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for NormalizedExtraction
+language
+  Input should be a valid string [type=string_type, input_value=['Urdu', 'English'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+2026-05-07 11:19:37,103 | ERROR | ncai_pipeline.pipeline.orchestrator | NAS document processing failed for b4u_new_complaints_bundle_1_dated_17122025_7bdf1c2c7686a121
+Traceback (most recent call last):
+  File "E:\NCAI\src\ncai_pipeline\pipeline\orchestrator.py", line 440, in _run_nas
+    processed_manifest = self._process_document(
+                         ^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\NCAI\src\ncai_pipeline\pipeline\orchestrator.py", line 630, in _process_document
+    raw_records, normalized_records, page_processing, reset_review_pages = self._process_page_scope(
+                                                                           ^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\NCAI\src\ncai_pipeline\pipeline\orchestrator.py", line 1153, in _process_page_scope
+    normalized = normalize_provider_payload(manifest.document_id, page.page_number, parsed_payload)
+                 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "E:\NCAI\src\ncai_pipeline\parsing\normalizer.py", line 79, in normalize_provider_payload
+    return NormalizedExtraction(
+           ^^^^^^^^^^^^^^^^^^^^^
+  File "E:\NCAI\.venv\Lib\site-packages\pydantic\main.py", line 263, in __init__
+    validated_self = self.__pydantic_validator__.validate_python(data, self_instance=self)
+                     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+pydantic_core._pydantic_core.ValidationError: 1 validation error for NormalizedExtraction
+language
+  Input should be a valid string [type=string_type, input_value=['Urdu', 'English'], input_type=list]
+    For further information visit https://errors.pydantic.dev/2.13/v/string_type
+2026-05-07 13:10:46,419 | ERROR | ncai_pipeline.providers.gemini_provider | Gemini invocation failed for b4u_new_complaints_bundle_1_dated_17122025_7bdf1c2c7686a121 page 207: The read operation timed out
+2026-05-07 13:23:01,763 | ERROR | ncai_pipeline.providers.gemini_provider | Gemini invocation failed for b4u_new_complaints_bundle_1_dated_17122025_7bdf1c2c7686a121 page 222: The read operation timed out
+2026-05-07 13:31:04,657 | ERROR | ncai_pipeline.providers.gemini_provider | Gemini invocation failed for b4u_new_complaints_bundle_1_dated_17122025_7bdf1c2c7686a121 page 226: The read operation timed out

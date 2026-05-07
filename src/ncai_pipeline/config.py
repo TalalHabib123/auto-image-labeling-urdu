@@ -25,6 +25,33 @@ class EnvironmentSettings(BaseSettings):
         return self.gemini_api_key or self.gemini_project_api
 
 
+class BlankPageDetectionSettings(BaseModel):
+    enabled: bool = True
+    white_threshold: int = 245
+    dark_threshold: int = 200
+    max_nonwhite_ratio: float = 0.005
+    max_dark_ratio: float = 0.001
+    min_mean_luma: float = 248.0
+    min_pixels: int = 20_000
+    sample_max_dimension: int = 512
+
+    @model_validator(mode="after")
+    def validate_blank_detection(self) -> "BlankPageDetectionSettings":
+        if not 0 <= self.dark_threshold <= self.white_threshold <= 255:
+            raise ValueError("pipeline.blank_page_detection thresholds must satisfy 0 <= dark <= white <= 255")
+        if not 0 <= self.max_nonwhite_ratio <= 1:
+            raise ValueError("pipeline.blank_page_detection.max_nonwhite_ratio must be between 0 and 1")
+        if not 0 <= self.max_dark_ratio <= 1:
+            raise ValueError("pipeline.blank_page_detection.max_dark_ratio must be between 0 and 1")
+        if not 0 <= self.min_mean_luma <= 255:
+            raise ValueError("pipeline.blank_page_detection.min_mean_luma must be between 0 and 255")
+        if self.min_pixels < 0:
+            raise ValueError("pipeline.blank_page_detection.min_pixels must be greater than or equal to 0")
+        if self.sample_max_dimension <= 0:
+            raise ValueError("pipeline.blank_page_detection.sample_max_dimension must be positive")
+        return self
+
+
 class PipelineSettings(BaseModel):
     version: str = "0.1.0"
     storage_mode: Literal["local", "nas"] = "local"
@@ -38,6 +65,7 @@ class PipelineSettings(BaseModel):
     concurrency: int = 1
     prompt_version: str = "ocr_v1"
     pdf_render_scale: float = 2.0
+    blank_page_detection: BlankPageDetectionSettings = Field(default_factory=BlankPageDetectionSettings)
 
     @field_validator("storage_mode", mode="before")
     @classmethod

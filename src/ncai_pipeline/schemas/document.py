@@ -4,7 +4,7 @@ from datetime import datetime
 
 from pydantic import Field
 
-from ncai_pipeline.schemas.common import BaseSchemaModel, PipelineStatus
+from ncai_pipeline.schemas.common import BaseSchemaModel, PageProcessingState, PipelineStatus
 
 
 class DocumentManifest(BaseSchemaModel):
@@ -33,6 +33,7 @@ class DocumentManifest(BaseSchemaModel):
     published_at: datetime | None = None
     artifact_version: int | None = None
     completion_marker_path: str | None = None
+    page_processing: list[PageProcessingState] = Field(default_factory=list)
 
 
 class PageArtifact(BaseSchemaModel):

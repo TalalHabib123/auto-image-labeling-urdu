@@ -5,7 +5,7 @@ from enum import Enum
 
 from pydantic import Field
 
-from ncai_pipeline.schemas.common import ApprovalMetadata, BaseSchemaModel, ReviewStatus
+from ncai_pipeline.schemas.common import ApprovalMetadata, BaseSchemaModel, PageProcessingState, ReviewStatus
 from ncai_pipeline.schemas.extraction import NormalizedExtraction
 
 
@@ -40,5 +40,6 @@ class CorrectedDocument(BaseSchemaModel):
     approval_metadata: ApprovalMetadata = Field(default_factory=ApprovalMetadata)
     extracted_pages: list[NormalizedExtraction] = Field(default_factory=list)
     page_reviews: list[PageReviewState] = Field(default_factory=list)
+    page_processing: list[PageProcessingState] = Field(default_factory=list)
     consolidated_text: str = ""
     target_output: dict[str, object] = Field(default_factory=dict)

@@ -1,8 +1,8 @@
 pipeline:
   version: "0.1.0"
   storage_mode: "nas"
-  input_dir: '\\10.12.96.55\Development\NAB_Development\Talal\input'
-  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder\Final_Test'
+  input_dir: '\\10.12.96.55\Development\NAB_Development\input'
+  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\output'
   allowed_file_types:
     - ".png"
     - ".jpg"
@@ -18,10 +18,19 @@ pipeline:
   concurrency: 1
   prompt_version: "ocr_v1"
   pdf_render_scale: 2.0
+  blank_page_detection:
+    enabled: true
+    white_threshold: 245
+    dark_threshold: 200
+    max_nonwhite_ratio: 0.005
+    max_dark_ratio: 0.001
+    min_mean_luma: 248.0
+    min_pixels: 20000
+    sample_max_dimension: 512
 
 nas:
   input_root: '\\10.12.96.55\Development\NAB_Development\Talal\input'
-  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\New folder\Final_Test'
+  output_root: '\\10.12.96.55\Development\NAB_Development\Talal\output'
   scratch_root: '.\temp\nas_scratch'
   share_label:
   publish_strategy: "local_scratch_create_only" # local_scratch_create_only, local_scratch_atomic

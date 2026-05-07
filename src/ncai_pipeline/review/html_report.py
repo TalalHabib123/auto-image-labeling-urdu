@@ -71,9 +71,15 @@ def render_review_report(
 ) -> str:
     pages: list[dict[str, str | int]] = []
     raw_by_page = {record.page_number: record for record in raw_records}
-    for extraction in extractions:
+    for index, extraction in enumerate(extractions, start=1):
         raw_record = raw_by_page.get(extraction.page_number)
-        page_image = page_image_paths[(extraction.page_number or 1) - 1]
+        image_index = (extraction.page_number or index) - 1
+        if 0 <= image_index < len(page_image_paths):
+            page_image = page_image_paths[image_index]
+        elif index - 1 < len(page_image_paths):
+            page_image = page_image_paths[index - 1]
+        else:
+            page_image = Path("")
         pages.append(
             {
                 "page_number": extraction.page_number or 0,
@@ -95,4 +101,3 @@ def render_review_report(
         correction_path=str(correction_path.resolve()),
         diff_text=diff_text or "No textual changes yet.",
     )
-
