@@ -1,4 +1,4 @@
-# NCAI OCR Pipeline
+# Udru Labeling OCR Pipeline
 
 Production-style OCR extraction pipeline for Urdu-heavy documents with:
 
