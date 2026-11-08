@@ -11,7 +11,7 @@ Production-style OCR extraction pipeline for Urdu-heavy documents with:
 
 ## Architecture
 
-The pipeline is organized under `src/ncai_pipeline/` by responsibility:
+The pipeline is organized under `src/company_pipeline/` by responsibility:
 
 - `ingestion/`: file discovery, type detection, image normalization, PDF rendering
 - `providers/`: provider contract plus Gemini implementation
@@ -61,7 +61,7 @@ Important settings:
 - export dataset types, output formats, region source, shared asset strategy, and handwritten crop settings
 - logging level
 
-You can point to a different config file with `NCAI_CONFIG_PATH` or `--config`.
+You can point to a different config file with `company_CONFIG_PATH` or `--config`.
 
 ### NAS Storage Mode
 
@@ -72,10 +72,10 @@ pipeline:
   storage_mode: "nas"
 
 nas:
-  input_root: "Z:/NCAI/input"
-  output_root: "Z:/NCAI/output"
+  input_root: "Z:/company/input"
+  output_root: "Z:/company/output"
   scratch_root: "data/nas_scratch"
-  share_label: "ncai_z_drive"
+  share_label: "company_z_drive"
   publish_strategy: "local_scratch_atomic"
 ```
 
